@@ -1,0 +1,14 @@
+__pycache__/
+build*/
+data*/
+dist/
+out*/
+unsloth_compiled_cache/
+wandb/
+*.egg-info/
+*.hip
+*_hip.cuh
+*.npz
+*.out
+*.parquet
+*.so
