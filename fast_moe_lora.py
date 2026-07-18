@@ -2,8 +2,8 @@
 
 Packed expert forward projections run directly through grouped gfx1151 MMQ.
 Gate and up share one dynamic Q8_1 activation workspace. Frozen base input
-gradients decode active packed experts directly into BF16 WMMA fragments;
-gate and up accumulate into one FP32 route-gradient accumulator. Rank-small
+gradients decode active packed experts directly into BF16 WMMA fragments.
+Gate and up accumulate into one FP32 route-gradient accumulator. Rank-small
 LoRA branches retain AITER ``gmm`` and factor gradients retain AITER ``ptgmm``.
 No logical base matrix, full expert LoRA delta, or effective expert-weight
 gradient is constructed.

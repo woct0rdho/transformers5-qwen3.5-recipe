@@ -32,7 +32,7 @@ from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import (
     load_balancing_loss_func,
 )
 
-_PACKED_LM_HEAD_CHUNK_SIZE = 64
+_PACKED_LM_HEAD_CHUNK_SIZE = 256
 
 
 def _packed_q8_linear_cross_entropy_forward(
@@ -103,7 +103,7 @@ def _packed_q8_linear_cross_entropy_forward(
     for start in range(0, rows, chunk_size):
         end = min(start + chunk_size, rows)
         # Native MMQ intentionally rejects nonzero storage offsets. This small,
-        # explicit BF16 copy is at most 256 KiB for the production chunk size
+        # explicit BF16 copy is at most 1 MiB for the production chunk size
         # and remains separate from the much larger logits workspace.
         input_chunk = input[start:end].clone()
         logits_chunk = torch.ops.torch_ggml_ops.mmq.default(

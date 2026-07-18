@@ -15,7 +15,10 @@ from torch.utils._python_dispatch import TorchDispatchMode
 from transformers.integrations.gguf import GGUFLinear
 from transformers.integrations.gguf_dequant import GGUFQuantizedTensor
 
-from gguf_liger_loss import _packed_q8_liger_for_causal_lm_loss
+from gguf_liger_loss import (
+    _PACKED_LM_HEAD_CHUNK_SIZE,
+    _packed_q8_liger_for_causal_lm_loss,
+)
 
 _MODEL = Path(
     os.environ.get(
@@ -69,9 +72,10 @@ def test_packed_q8_liger_loss_matches_logical_reference_and_uses_native_ops(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     generator = torch.Generator(device="cuda").manual_seed(12345)
+    rows = _PACKED_LM_HEAD_CHUNK_SIZE + 1
     hidden_reference = torch.randn(
         1,
-        65,
+        rows,
         2048,
         generator=generator,
         device="cuda",
@@ -82,7 +86,7 @@ def test_packed_q8_liger_loss_matches_logical_reference_and_uses_native_ops(
     labels = torch.randint(
         0,
         q6_lm_head.out_features,
-        (1, 65),
+        (1, rows),
         generator=generator,
         device="cuda",
     )
@@ -145,12 +149,14 @@ def test_packed_q8_liger_loss_matches_logical_reference_and_uses_native_ops(
     assert gradient_cosine > 0.999
     assert gradient_relative_l2 < 0.03
     assert packed_accuracy.shape == reference_accuracy.shape == torch.Size([])
-    assert packed_predictions.shape == reference_predictions.shape == (65,)
+    assert packed_predictions.shape == reference_predictions.shape == (rows,)
     assert torch.isfinite(packed_loss)
     assert torch.isfinite(hidden_packed.grad).all()
     assert q6_lm_head.weight.grad is None
-    assert counter.counts["torch_ggml_ops.mmq.default"] == math.ceil(65 / 64)
-    assert counter.counts["torch_ggml_ops.mmq_grad_input.default"] == math.ceil(65 / 64)
+    assert _PACKED_LM_HEAD_CHUNK_SIZE == 256
+    expected_calls = math.ceil(rows / _PACKED_LM_HEAD_CHUNK_SIZE)
+    assert counter.counts["torch_ggml_ops.mmq.default"] == expected_calls
+    assert counter.counts["torch_ggml_ops.mmq_grad_input.default"] == expected_calls
 
 
 @pytest.mark.parametrize(

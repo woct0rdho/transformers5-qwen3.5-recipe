@@ -31,7 +31,7 @@ def configure_qwen35_flash_attention_2() -> bool:
 
     This targets BF16 causal BSHD attention with Hq=16, Hkv=2, D=256, and a
     maximum sequence length of 2048 on gfx1151. Rank/layout work stays inside
-    AITER; no process-wide AITER autotune environment variable is changed.
+    AITER. No process-wide AITER autotune environment variable is changed.
     """
     _replace_autotune_configs(
         fwd_prefill.attn_fwd,
