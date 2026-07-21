@@ -13,10 +13,11 @@ from peft import LoraConfig, TaskType, get_peft_model
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
+    Trainer,
+    TrainingArguments,
     default_data_collator,
     set_seed,
 )
-from trl import SFTConfig, SFTTrainer
 
 from attention_aiter_tuning import configure_qwen35_flash_attention_2
 from fast_lora import register_fast_lora
@@ -44,7 +45,7 @@ def fixed_length_lm_collator(examples):
 
 def main():
     model_dir = Path.home() / "models/qwen3.6"
-    gguf_file = model_dir / "Qwen3.6-35B-A3B-APEX-I-Mini.gguf"
+    gguf_file = "Qwen3.6-35B-A3B-APEX-I-Mini.gguf"
     tokenizer_id = "Qwen/Qwen3.5-35B-A3B"
     dataset_dir = script_dir / "data_tokenized_qwen3.5"
     output_dir = script_dir / "out_qwen36_35b"
@@ -62,7 +63,8 @@ def main():
 
     model = AutoModelForCausalLM.from_pretrained(
         model_dir,
-        gguf_file=gguf_file.name,
+        gguf_file=gguf_file,
+        gguf_mmap_policy="release",
         dtype=torch.bfloat16,
         attn_implementation="flash_attention_2",
         device_map={"": "cuda:0"},
@@ -110,15 +112,15 @@ def main():
 
     model.print_trainable_parameters()
 
+    # Dataset is shuffled by the trainer by default
     dataset = load_from_disk(dataset_dir)
-    dataset = dataset.shuffle(seed=random_seed)
 
-    sft_config = SFTConfig(
+    training_args = TrainingArguments(
         output_dir=str(output_dir),
         per_device_train_batch_size=1,  # Increase batch size if you have more VRAM
         gradient_accumulation_steps=1,
         learning_rate=1e-4,
-        weight_decay=1e-3,  # Dense: 1e-2, MoE: 1e-3, for MoE models this can be smaller than dense models
+        weight_decay=1e-3,  # For MoE models this can be smaller than dense models
         max_grad_norm=1,
         num_train_epochs=1,
         lr_scheduler_type="linear",
@@ -138,24 +140,17 @@ def main():
         },
         gradient_checkpointing=True,
         gradient_checkpointing_kwargs={"use_reentrant": False},
-        packing=False,
-        padding_free=False,
-        max_length=2048,
-        dataset_num_proc=0,
-        dataset_kwargs={"skip_prepare_dataset": True},
         remove_unused_columns=False,
-        loss_type="nll",
-        router_aux_loss_coef=0.0,  # Disable load balancing loss to save VRAM
         # torch_compile=True,
         # torch_compile_mode="max-autotune",
         report_to="wandb",
         seed=random_seed,
     )
-    trainer = SFTTrainer(
+    trainer = Trainer(
         model=model,
         processing_class=tokenizer,
         train_dataset=dataset,
-        args=sft_config,
+        args=training_args,
         data_collator=fixed_length_lm_collator,
     )
 
