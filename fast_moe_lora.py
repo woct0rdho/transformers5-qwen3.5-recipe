@@ -28,10 +28,8 @@ from transformers.integrations.gguf_dequant import (
     GGUFQuantizedTensor,
     dequantize_gguf_tensor,
 )
-from transformers.integrations.moe import (
-    _finalize_expert_routing,
-    _prepare_expert_routing,
-)
+
+from fast_moe_routing import finalize_expert_routing, prepare_expert_routing
 
 EXPERTS_IMPLEMENTATION = "qwen3_5_moe_gguf_mmq_aiter_lora"
 _LORA_WEIGHTS_KWARG = "_qwen3_5_moe_gguf_lora_weights"
@@ -732,11 +730,10 @@ def qwen3_5_moe_gguf_mmq_aiter_lora_forward(
         )
 
     compute_hidden_states = self._prepare_expert_hidden_states(hidden_states)
-    routing_plan = _prepare_expert_routing(
+    routing_plan = prepare_expert_routing(
         compute_hidden_states,
         top_k_index,
         top_k_weights,
-        "grouped_mm",
     )
     execution_plan = self._prepare_expert_execution(routing_plan, "grouped_mm")
     if execution_plan.offsets is None:
@@ -793,8 +790,11 @@ def qwen3_5_moe_gguf_mmq_aiter_lora_forward(
         )
         output = torch.add(output, down_delta, alpha=lora_weights.scaling)
 
-    return _finalize_expert_routing(
-        self, output, hidden_states, routing_plan, execution_plan
+    return finalize_expert_routing(
+        output,
+        hidden_states,
+        routing_plan,
+        execution_plan.output_mask,
     )
 
 

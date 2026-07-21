@@ -28,6 +28,7 @@ from gguf_liger_loss import apply_gguf_liger_fused_linear_cross_entropy
 script_dir = Path(__file__).resolve().parent
 
 
+# I usually preprocess the dataset into chunks with fixed length. You may change this with your dataset
 def fixed_length_lm_collator(examples):
     batch = default_data_collator(examples)
     input_ids = batch["input_ids"].long()

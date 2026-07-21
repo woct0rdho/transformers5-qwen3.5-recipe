@@ -4,7 +4,7 @@
 
 The target has been demonstrated: Qwen3.6-35B-A3B rank-4 LoRA can complete full-model batch-1, sequence-2048 training updates with both live PyTorch allocation and allocator reservation below 16 GiB.
 
-Production configuration:
+Configuration:
 - checkpoint: `~/models/qwen3.6/Qwen3.6-35B-A3B-APEX-I-Mini.gguf`.
 - architecture: text-only `Qwen3_5MoeForCausalLM`.
 - tokenizer: `Qwen/Qwen3.5-35B-A3B`.
@@ -16,27 +16,7 @@ Production configuration:
 - bitsandbytes `adamw_8bit` for adapter parameters only.
 - top-8 routing active, with router-logit retention and the auxiliary balancing objective disabled.
 
-Current sequence-2048 two-pass measurement:
-
-| Phase | Peak allocated | Peak reserved | Time |
-| --- | ---: | ---: | ---: |
-| Model load | 13.323 GiB | 13.465 GiB | 11.36 s |
-| Adapter injection | 13.721 GiB | 13.738 GiB | 0.51 s |
-| First forward | 14.527 GiB | 14.584 GiB | 6.33 s |
-| First backward | 14.960 GiB | 15.020 GiB | 8.85 s |
-| AdamW8bit step | 14.792 GiB | 15.146 GiB | 0.09 s |
-| Second forward | 15.050 GiB | 15.209 GiB | 3.32 s |
-| Second backward | 15.399 GiB | 15.463 GiB | 8.62 s |
-
-The steady-state maximum is now the second backward rather than an avoidable forward materialization. A direct one-step `SFTTrainer.train()` memory-validation run measured 14.928 GiB allocated, 15.150 GiB reserved, and 15.24 seconds. That one-step run includes cold compilation, autotuning, and optimizer-state initialization and is not the steady-state runtime result. The warmed profile is recorded in section 8.
-
-The full audit produced all 660 finite trainable gradients, no frozen or packed-weight gradients, updates to all 330 LoRA-B tensors on the first step, and finite nonzero A/B gradients after the first update. Both packed-loss forwards returned `logits=None` and `aux_loss=None`.
-
-Primary report: `/tmp/qwen36_packed_q8_lm_head_final_report.json`.
-
-## Fixed training contract
-
-The implementation is intentionally narrow. Future optimization must preserve these rules:
+Future optimization must preserve these rules:
 - GGUF is the sole base-weight representation.
 - bitsandbytes is used only by `adamw_8bit`.
 - Packed base parameters remain frozen and never receive gradients.
@@ -69,7 +49,7 @@ Reusable Transformers support provides:
 - Qwen3.5 recurrent input/output layout handling.
 - capability-validated private expert backend names for specialized `GGUFExperts` execution.
 
-The production ordinary, routed-expert, and LM-head paths no longer materialize logical base matrices. The remaining users of logical materialization are the 90 recurrent-layout projections that do not yet have permutation-aware MMQ kernels and explicit compatibility/reference paths.
+The ordinary, routed-expert, and LM-head paths no longer materialize logical base matrices. The remaining users of logical materialization are the 90 recurrent-layout projections that do not yet have permutation-aware MMQ kernels and explicit compatibility/reference paths.
 
 ### Ordinary packed LoRA
 
@@ -110,9 +90,35 @@ The project-private expert backend uses Transformers routing and reduction while
 - factor gradients use AITER PTGMM.
 - no full expert delta, effective trainable expert matrix, selected logical expert copy, or packed gradient is created.
 
-Routing, SiLU, gate/up multiplication, route weighting, inverse permutation, reduction, and LoRA residual accumulation remain framework-level operations. Native fusion stops at the projection boundary.
+SiLU, gate/up multiplication, and LoRA residual accumulation remain framework-level operations. The existing routing forward expressions are preserved, while route gathering and weighted combine use the completed Triton autograd path. Native projection fusion stops at the projection boundary.
 
 A matched layer-10 sequence-2048 benchmark measured 93.38 ms for packed forward plus backward versus 195.10 ms for selective materialization plus AITER, a 52.1% complete-layer speedup. Peak allocation and reservation were also more than 1 GiB lower in the packed variant.
+
+### Triton routing autograd kernels
+
+`fast_moe_routing.py` replaces the generic route-gather and weighted-combine backward graphs for:
+- contiguous CUDA BF16 hidden states shaped `[T, 2048]`, where `1 <= T <= 32768`.
+- top-k indices and BF16 or FP32 weights shaped `[T, 8]`.
+- contiguous route output shaped `[T * 8, 2048]`.
+- no expert execution output mask.
+
+This range includes sequence-2048 batches 1, 4, and 16. Token, route, allocation, and launch-grid sizes are derived from tensor metadata without device synchronization. Measured full-width launch buckets use 4/8 gather/combine warps through 2,048 tokens, 8/16 through 8,192 tokens, and 16/16 through 32,768 tokens. Hidden-dimension tiling was measured and rejected because repeated route metadata and additional programs made it substantially slower at all three target batches.
+
+The forward expressions and grouped-MMQ calls remain unchanged. The custom autograd path provides:
+- deterministic gather backward with expert-route duplicates processed in sorted source-position order and BF16 rounding after every accumulation, matching PyTorch's current indexed-gather gradient.
+- weighted-combine backward for expert-output and routing-weight gradients in one Triton kernel.
+- generic Torch routing for unsupported shapes, dtypes, devices, layouts, token counts, or masked outputs.
+- no host route descriptors, `.item()` synchronization, dense logical expert weights, packed-weight changes, or grouped-MMQ ABI changes.
+
+The latest isolated warmed launch sweep on gfx1151 measured:
+
+| Sequence-2048 batch | Tokens | Gather backward | Combine backward |
+| ---: | ---: | ---: | ---: |
+| 1 | 2,048 | 0.339 ms | 0.636 ms |
+| 4 | 8,192 | 1.325 ms | 3.363 ms |
+| 16 | 32,768 | 5.252 ms | 14.691 ms |
+
+The latest full-step profile remains the batch-1 profile below: it measured 14.657 ms for all 40 gather-backward launches and 33.313 ms for all 40 combine-backward launches. Residual `aten::_index_put_impl_` activity was 0.273 ms across 80 metadata operations. Automated tests cover BF16 and FP32 routing weights, exact forward and gradient behavior at fixed and dynamic token counts, batch-1/4/16 dispatch policy, fallback dispatch, and absence of generic indexed-scatter backward. Separate large-grid validation executed exact constant-value forward and gradient checks at batches 4 and 16.
 
 ### Native gfx1151 GGUF operators
 
@@ -183,19 +189,18 @@ Numerical comparison with the logical-BF16 fused reference:
 
 The Q8_1 activation forward is therefore retained. Backward remains the logical packed-weight Jacobian rather than differentiation through rounding.
 
-A production-geometry 2,048-row packed-loss benchmark measured:
+A 2,048-row packed-loss benchmark measured:
 
 | Chunk rows | Median core loss time | Peak allocation above resident inputs |
 | ---: | ---: | ---: |
 | 64 | 312.690 ms | 69.03 MiB |
 | 256 | 229.958 ms | 253.57 MiB |
 
-The 256-row schedule is 26.5% faster in the complete MMQ-forward, in-place cross-entropy, and MMQ-backward loop. Its additional approximately 184.5 MiB peak allocation is accepted for production.
+The 256-row schedule is 26.5% faster in the complete MMQ-forward, in-place cross-entropy, and MMQ-backward loop. Its additional approximately 184.5 MiB peak allocation is accepted.
 
 ### Router auxiliary-memory removal
 
 Top-8 routing is unchanged, but retention of all layer router logits and the generic load-balancing objective are disabled:
-
 - `model.config.output_router_logits = False`.
 - `model.config.router_aux_loss_coef = 0.0`.
 - `SFTConfig(router_aux_loss_coef=0.0)`.
@@ -220,7 +225,7 @@ The trainer also includes:
 
 ### Warmed full-step runtime profile
 
-A production-geometry profile was collected after the `torch-ggml-ops` optimizations:
+The latest profile uses:
 - batch size 1 and sequence length 2048.
 - BF16 compute and rank-4 LoRA.
 - non-reentrant checkpointing on all 40 decoder layers.
@@ -228,97 +233,82 @@ A production-geometry profile was collected after the `torch-ggml-ops` optimizat
 - synchronized wall-clock boundaries around forward, backward, gradient clipping, and the optimizer.
 - correlated GPU kernel-duration sums for module and kernel attribution.
 
-The warm-up update took 13.497 seconds. The traced steady-state update measured:
+The warm-up update took 9.998 seconds. The warmed traced update measured:
 
 | Phase | Wall time | Step share |
 | --- | ---: | ---: |
-| Forward | 2.164 s | 26.32% |
-| Backward | 5.979 s | 72.70% |
-| Gradient clipping | 10.3 ms | 0.13% |
-| AdamW8bit step | 46.7 ms | 0.57% |
-| Other loop overhead | 24.2 ms | 0.29% |
-| Total | 8.224 s | 100% |
+| Forward | 2.019 s | 31.04% |
+| Backward | 4.406 s | 67.71% |
+| Gradient clipping | 10.6 ms | 0.16% |
+| AdamW8bit step | 46.7 ms | 0.72% |
+| Other loop overhead | 24.0 ms | 0.37% |
+| Total | 6.507 s | 100% |
 
-The traced times include profiler overhead and are a single warmed sample rather than a benchmark distribution. They are nevertheless suitable for relative attribution because all requested kernel families were correlated to their launching operations.
+The traced times include profiler overhead and are a single warmed sample rather than a benchmark distribution. They are suitable for relative attribution because all requested kernel families were correlated to their launching operations.
 
-Forward decoder-layer GPU work totaled 1.457 seconds:
+Forward decoder-layer GPU work totaled 1.448 seconds:
 
 | Module | GPU kernel time | Calls | Average per call |
 | --- | ---: | ---: | ---: |
-| MoE block | 696.7 ms | 40 | 17.42 ms |
-| GatedDeltaNet | 644.7 ms | 30 | 21.49 ms |
-| Full attention | 109.9 ms | 10 | 10.99 ms |
+| MoE block | 694.2 ms | 40 | 17.35 ms |
+| GatedDeltaNet | 638.4 ms | 30 | 21.28 ms |
+| Routed experts | 626.1 ms | 40 | 15.65 ms |
+| Full attention | 109.8 ms | 10 | 10.98 ms |
+| Shared-expert MLP | 40.2 ms | 40 | 1.01 ms |
 
-The routed experts account for 628.6 ms of the 696.7 ms MoE total, while the shared-expert MLP accounts for 40.2 ms. GatedDeltaNet forward contains 301.2 ms of FLA/recurrent kernels and 255.3 ms of GEMM. The complete Flash Attention forward kernels take only 16.9 ms. Approximately 235 ms outside the decoder layers is the packed LM-head MMQ, packed input gradient, and in-place cross-entropy path.
+GatedDeltaNet forward contains 296.0 ms of FLA/recurrent kernels and 253.4 ms of GEMM. The complete Flash Attention forward kernels take 16.9 ms. Approximately 235 ms outside the decoder layers is the packed LM-head MMQ, packed input gradient, and in-place cross-entropy path.
 
-Backward decoder-layer GPU work totaled 5.299 seconds. Non-reentrant checkpoint recomputation accounts for 1.446 seconds, or 27.3%, while actual autograd work accounts for 3.853 seconds. The exclusive decomposition is:
+Backward decoder-layer GPU work totaled 4.311 seconds. Non-reentrant checkpoint recomputation accounts for 1.441 seconds, or 33.4%, while actual autograd work accounts for 2.870 seconds. The exclusive decomposition is:
 
 | Module side | Actual backward | Checkpoint recompute | Inclusive backward phase |
 | --- | ---: | ---: | ---: |
-| MoE | 1.719 s | 686.8 ms | 2.406 s |
-| GatedDeltaNet side | 1.676 s | 647.4 ms | 2.324 s |
-| Attention side | 457.9 ms | 111.3 ms | 569.2 ms |
+| MoE | 742.6 ms | 688.0 ms | 1.431 s |
+| GatedDeltaNet side | 1.670 s | 641.8 ms | 2.311 s |
+| Attention side | 458.2 ms | 111.2 ms | 569.4 ms |
 
-The GatedDeltaNet and attention sides include their adjacent layer-normalization and residual work outside the MoE block. Every forward-path optimization also reduces checkpoint recomputation, so its full-step value is larger than the isolated forward saving.
-
-The kernel-family totals were:
+The kernel-family totals are:
 
 | Kernel family | Forward GPU time | Backward-phase GPU time |
 | --- | ---: | ---: |
-| FLA/recurrent | 301.2 ms | 1.358 s |
-| Routing/indexing | 60.1 ms | 1.023 s |
-| Grouped MMQ | 367.2 ms | 771.6 ms |
-| GEMM | 300.1 ms | 610.6 ms |
-| Dense MMQ | 299.5 ms | 157.1 ms |
-| Flash Attention | 16.9 ms | 333.0 ms |
-| AITER GMM | 94.5 ms | 163.3 ms |
-| AITER PTGMM | 0 ms | 48.2 ms |
+| FLA/recurrent | 296.0 ms | 1.348 s |
+| Grouped MMQ | 364.9 ms | 771.4 ms |
+| GEMM | 298.3 ms | 609.8 ms |
+| Dense MMQ | 296.1 ms | 157.5 ms |
+| Flash Attention | 16.9 ms | 333.6 ms |
+| AITER GMM | 93.9 ms | 168.5 ms |
+| AITER PTGMM | 0 ms | 48.1 ms |
+| Routing/indexing | 60.0 ms | 118.9 ms |
 
-Backward-phase totals include checkpoint recomputation. For grouped MMQ, 363.7 ms is recomputed gate/up and down forward work, while the actual paired gate/up and down input-gradient kernels cost 222.6 ms and 185.2 ms respectively, or 407.9 ms combined. AITER's backward-phase total consists of 93.5 ms of recomputed forward GMM, 69.7 ms of input-gradient GMM, and 48.2 ms of PTGMM factor gradients.
-
-The largest unexpected operation is generic indexed-gather backward scatter:
-- `aten::_index_put_impl_`: 918.8 ms.
-- raw `indexing_backward_kernel`: 916.8 ms.
-- 22.97 ms per decoder layer on average, with a 22.84-23.07 ms range across all 40 layers.
-- 17.3% of all backward GPU kernel time and 53.8% of actual MoE backward.
-
-This is consistent with backward scatter from the expert-row routing gathers and confirms that framework routing gather/scatter is now a primary bottleneck rather than a speculative fusion target. Other leading raw kernels are the 467.3 ms FLA `dhu` kernel, the 309.0 ms fused-causal Flash Attention backward kernel, the 253.0 ms FLA `dqkwg` kernel, and the 176.7 ms FLA WY-preparation backward kernel.
+Backward-phase totals include checkpoint recomputation. The remaining leading opportunities are GatedDeltaNet/FLA, grouped-MMQ input gradients, GEMM, and Flash Attention.
 
 Profile artifacts:
-- refined report: `/tmp/qwen35_training_step_profile_refined.json`.
-- Chrome/Kineto trace: `/tmp/qwen35_training_step_trace.json`.
+- refined report: `/tmp/qwen35_training_step_profile_refined_routing.json`.
+- Chrome/Kineto trace: `/tmp/qwen35_training_step_trace_routing.json`.
 - reproduction driver: `/tmp/profile_qwen35_training_step.py`.
 
 ## Remaining work
-
-- Replace the generic MoE routing gather backward scatter.
-  - identify the exact indexed gather whose autograd emits the 918.8 ms `aten::_index_put_impl_` path.
-  - implement a route-aware inverse permutation/reduction or custom backward that preserves top-8 routing and the existing expert ordering.
-  - avoid dense token-by-expert intermediates, CPU route metadata, hidden synchronization, or materialized expert matrices.
-  - measure complete-step time and memory because the current cost is almost exactly 23 ms in every decoder layer.
-  - do not introduce a stock external MoE replacement merely for architectural neatness.
 
 - Add permutation-aware MMQ for the 90 GatedDeltaNet projections.
   - preserve physical input/output permutations exactly.
   - keep authoritative GGUF values and the original BF16 LoRA input.
   - remove their remaining logical-weight compatibility materializations.
-  - target the measured 255.3 ms GatedDeltaNet forward GEMM and 274.3 ms actual-backward GEMM, plus their checkpoint repetition.
+  - target the measured 253.4 ms GatedDeltaNet forward GEMM and 274.2 ms actual-backward GEMM, plus their checkpoint repetition.
   - measure full-model runtime and memory rather than relying only on isolated projections.
 
 - Reduce GatedDeltaNet/FLA backward time.
-  - actual GatedDeltaNet-side backward is 1.676 seconds, including 1.057 seconds of FLA/recurrent kernels.
+  - actual GatedDeltaNet-side backward is 1.670 seconds, including 1.053 seconds of FLA/recurrent kernels.
   - prioritize the `chunk_gated_delta_rule_bwd_kernel_dhu`, `chunk_bwd_kernel_dqkwg`, WY-preparation, and causal-convolution backward paths.
-  - retain the fixed production geometry and exact recurrence rather than replacing the layer with a different algorithm.
-  - account for the additional 647.4 ms GatedDeltaNet-side checkpoint recomputation when evaluating forward changes.
+  - retain the fixed and exact recurrence rather than replacing the layer with a different algorithm.
+  - account for the additional 641.8 ms GatedDeltaNet-side checkpoint recomputation when evaluating forward changes.
 
 - Reduce grouped packed input-gradient runtime.
-  - paired gate/up and down packed input gradients cost 222.6 ms and 185.2 ms per step respectively.
+  - paired gate/up and down packed input gradients cost 223.1 ms and 183.9 ms per step respectively.
   - preserve the current 8/16/64 MiB-scale live footprints.
   - tune decoder reuse, occupancy, and WMMA scheduling.
   - reject optimizations that require logical matrices, packed transposes, or cotangent quantization.
 
 - Tune rank-4 AITER LoRA execution after the larger bottlenecks.
-  - production-route-count profiling is complete: actual input-gradient GMM costs 69.7 ms, PTGMM costs 48.2 ms, and checkpoint recomputation adds 93.5 ms of forward GMM.
+  - route-count profiling is complete: actual input-gradient GMM costs 74.5 ms, PTGMM costs 48.1 ms, and checkpoint recomputation adds 93.9 ms of forward GMM.
   - reduce factor-layout repacking and contiguous intermediates where AITER supports the required layout.
   - investigate LoRA-B accumulation only if AITER exposes safe GEMM alpha/beta or epilogue support.
-  - keep this below routing scatter, GatedDeltaNet/FLA, and grouped-MMQ backward in priority.
+  - keep this below GatedDeltaNet/FLA and grouped-MMQ backward in priority.
