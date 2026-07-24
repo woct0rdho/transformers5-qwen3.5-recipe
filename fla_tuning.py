@@ -1,15 +1,8 @@
 import importlib
-import warnings
 from typing import Any
 
-import fla
-import torch
 import triton
 from triton.runtime.autotuner import Autotuner
-
-_REQUIRED_FLA_VERSION = "0.5.1"
-_REQUIRED_TRITON_VERSION = "3.8.0"
-_REQUIRED_ARCH = "gfx1151"
 
 # Entries are (module, outer decorated kernel, exact Triton cache key, config).
 # They were selected on Radeon 8060S / gfx1151 for Qwen3.5-35B-A3B training:
@@ -287,33 +280,6 @@ def configure_qwen35_fla() -> int:
     dimensions, dtypes, recurrent-state modes, or variable-length modes retain
     FLA's normal autotuning behavior.
     """
-    if not torch.cuda.is_available():
-        warnings.warn(
-            "Qwen3.5 FLA tuning skipped because no GPU is available", stacklevel=2
-        )
-        return 0
-
-    arch = getattr(torch.cuda.get_device_properties(0), "gcnArchName", None)
-    if arch != _REQUIRED_ARCH:
-        warnings.warn(
-            f"Qwen3.5 FLA tuning targets {_REQUIRED_ARCH}, not {arch}; using stock FLA",
-            stacklevel=2,
-        )
-        return 0
-
-    fla_version = getattr(fla, "__version__", None)
-    if (
-        fla_version != _REQUIRED_FLA_VERSION
-        or triton.__version__ != _REQUIRED_TRITON_VERSION
-    ):
-        warnings.warn(
-            "Qwen3.5 FLA configs require "
-            f"FLA {_REQUIRED_FLA_VERSION} and Triton {_REQUIRED_TRITON_VERSION}; "
-            f"found FLA {fla_version} and Triton {triton.__version__}. Using stock FLA.",
-            stacklevel=2,
-        )
-        return 0
-
     configured = 0
     autotuners: dict[tuple[str, str], Autotuner] = {}
     for module_name, attribute, cache_key, config_values in _KNOWN_CONFIGS:

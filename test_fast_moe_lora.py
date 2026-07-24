@@ -8,19 +8,23 @@ import pytest
 import torch
 from peft import LoraConfig
 from torch.utils._python_dispatch import TorchDispatchMode
+from torch.utils.checkpoint import checkpoint
 from transformers.integrations.gguf import ALL_GGUF_EXPERTS_FUNCTIONS, GGUFExperts
 from transformers.integrations.gguf_dequant import (
     GGUFQuantizedTensor,
     dequantize_gguf_tensor,
 )
 
+import fast_moe_lora
 from fast_moe_lora import (
     EXPERTS_IMPLEMENTATION,
     FastGGUFMoeLora,
     _aiter_input_grad,
     _base_grouped_linear,
     _base_grouped_pair,
+    _complete_group_sizes,
     _group_sizes_from_offsets,
+    aiter_grouped_mm,
     qwen3_5_moe_gguf_mmq_aiter_lora_forward,
 )
 
@@ -41,6 +45,21 @@ _MODEL = Path(
         os.path.expanduser("~/models/qwen3.6/Qwen3.6-35B-A3B-APEX-I-Mini.gguf"),
     )
 )
+
+
+@pytest.fixture(autouse=True)
+def synthetic_aiter_configs(monkeypatch) -> None:
+    config = {
+        "BLOCK_SIZE_M": 32,
+        "BLOCK_SIZE_K": 32,
+        "BLOCK_SIZE_N": 32,
+        "GROUP_SIZE": 1,
+        "GRID_DIM": 40,
+        "num_warps": 4,
+        "num_stages": 1,
+    }
+    monkeypatch.setattr(fast_moe_lora, "_gmm_config", lambda *_: dict(config))
+    monkeypatch.setattr(fast_moe_lora, "_ptgmm_config", lambda *_: dict(config))
 
 
 @pytest.fixture(scope="module")
@@ -252,6 +271,130 @@ def test_packed_expert_projection_backward_is_exact_logical_jacobian(
     assert down.grad is None
 
 
+def test_full_group_lora_eliminates_selection_and_zeros_inactive_gradients() -> None:
+    generator = torch.Generator(device="cuda").manual_seed(8642)
+    active_experts = torch.tensor([1, 4, 7], device="cuda", dtype=torch.int64)
+    active_sizes = torch.tensor([2, 3, 1], device="cuda", dtype=torch.int32)
+    full_sizes = _complete_group_sizes(active_sizes, active_experts, 8)
+    lhs = torch.randn(
+        6,
+        16,
+        generator=generator,
+        device="cuda",
+        dtype=torch.bfloat16,
+        requires_grad=True,
+    )
+    factor = torch.randn(
+        8,
+        4,
+        16,
+        generator=generator,
+        device="cuda",
+        dtype=torch.bfloat16,
+        requires_grad=True,
+    )
+    reference_lhs = lhs.detach().clone().requires_grad_()
+    reference_factor = factor.detach().clone().requires_grad_()
+    grad_output = torch.randn(
+        6,
+        4,
+        generator=generator,
+        device="cuda",
+        dtype=torch.bfloat16,
+    )
+
+    dispatched_ops: list[str] = []
+    with _RecordOps(dispatched_ops):
+        output = aiter_grouped_mm(lhs, factor.transpose(1, 2), full_sizes)
+    reference = aiter_grouped_mm(
+        reference_lhs,
+        reference_factor.index_select(0, active_experts).transpose(1, 2),
+        active_sizes,
+    )
+    gradients = torch.autograd.grad(output, (lhs, factor), grad_output)
+    reference_gradients = torch.autograd.grad(
+        reference, (reference_lhs, reference_factor), grad_output
+    )
+
+    assert not any("index_select" in operation for operation in dispatched_ops)
+    torch.testing.assert_close(output, reference, rtol=0, atol=0)
+    for gradient, reference_gradient in zip(gradients, reference_gradients):
+        torch.testing.assert_close(gradient, reference_gradient, rtol=0, atol=0)
+    inactive = torch.ones(8, device="cuda", dtype=torch.bool)
+    inactive[active_experts] = False
+    assert torch.count_nonzero(gradients[1][inactive]) == 0
+
+    checkpoint_lhs = lhs.detach().clone().requires_grad_()
+    checkpoint_factor = factor.detach().clone().requires_grad_()
+    checkpoint_output = checkpoint(
+        lambda left, right: aiter_grouped_mm(left, right.transpose(1, 2), full_sizes),
+        checkpoint_lhs,
+        checkpoint_factor,
+        use_reentrant=False,
+    )
+    checkpoint_gradients = torch.autograd.grad(
+        checkpoint_output, (checkpoint_lhs, checkpoint_factor), grad_output
+    )
+    assert torch.equal(checkpoint_output, output)
+    for checkpoint_gradient, direct_gradient in zip(checkpoint_gradients, gradients):
+        assert torch.equal(checkpoint_gradient, direct_gradient)
+
+
+def test_aiter_config_dispatch_uses_rows_and_factor_layout(monkeypatch) -> None:
+    gmm_keys = []
+    ptgmm_keys = []
+
+    def record_gmm_config(m, k, n, transposed_rhs):
+        gmm_keys.append((m, k, n, transposed_rhs))
+        return {}
+
+    def record_ptgmm_config(m, k, n):
+        ptgmm_keys.append((m, k, n))
+        return {}
+
+    def fake_gmm(lhs, rhs, group_sizes, **kwargs):
+        output_n = rhs.shape[-1]
+        return lhs.new_empty((lhs.shape[0], output_n))
+
+    def fake_ptgmm(lhs, rhs, group_sizes, **kwargs):
+        return rhs.new_empty((group_sizes.numel(), lhs.shape[-1], rhs.shape[-1]))
+
+    monkeypatch.setattr(fast_moe_lora, "_gmm_config", record_gmm_config)
+    monkeypatch.setattr(fast_moe_lora, "_ptgmm_config", record_ptgmm_config)
+    monkeypatch.setattr(fast_moe_lora, "gmm", fake_gmm)
+    monkeypatch.setattr(fast_moe_lora, "ptgmm", fake_ptgmm)
+
+    lhs = torch.empty(6, 8)
+    factor = torch.empty(3, 3, 8).transpose(1, 2)
+    grad_output = torch.empty(6, 3)
+    group_sizes = torch.tensor([2, 2, 2], dtype=torch.int32)
+    fast_moe_lora._aiter_forward(lhs, factor, group_sizes)
+    fast_moe_lora._aiter_input_grad(grad_output, factor, group_sizes)
+    fast_moe_lora._aiter_weight_grad(lhs, grad_output, group_sizes)
+
+    assert gmm_keys == [(6, 8, 3, True), (6, 3, 8, False)]
+    assert ptgmm_keys == [(6, 8, 3)]
+
+
+def test_aiter_grouped_mm_rejects_layout_repairs() -> None:
+    lhs = torch.randn(16, 6, device="cuda", dtype=torch.bfloat16).T
+    factor = torch.randn(3, 4, 16, device="cuda", dtype=torch.bfloat16)
+    group_sizes = torch.tensor([2, 2, 2], device="cuda", dtype=torch.int32)
+    with pytest.raises(ValueError, match="lhs must be row-major"):
+        aiter_grouped_mm(lhs, factor.transpose(1, 2), group_sizes)
+
+    valid_lhs = torch.randn(
+        6, 16, device="cuda", dtype=torch.bfloat16, requires_grad=True
+    )
+    valid_factor = factor.detach().requires_grad_()
+    output = aiter_grouped_mm(valid_lhs, valid_factor.transpose(1, 2), group_sizes)
+    strided_gradient = torch.randn(
+        output.shape[1], output.shape[0], device="cuda", dtype=torch.bfloat16
+    ).T
+    with pytest.raises(ValueError, match="output gradient must be row-major"):
+        torch.autograd.grad(output, (valid_lhs, valid_factor), strided_gradient)
+
+
 def test_one_expert_layer_has_finite_lora_gradients_and_no_packed_gradients(
     reader: gguf.GGUFReader,
 ) -> None:
@@ -331,8 +474,10 @@ def test_one_expert_layer_has_finite_lora_gradients_and_no_packed_gradients(
         dtype=torch.bfloat16,
     )
 
-    output = layer(hidden, top_k_index, top_k_weights)
-    output.backward(grad_output)
+    dispatched_ops: list[str] = []
+    with _RecordOps(dispatched_ops):
+        output = layer(hidden, top_k_index, top_k_weights)
+        output.backward(grad_output)
 
     trainable_gradients = [
         parameter.grad for parameter in layer.parameters() if parameter.requires_grad
@@ -346,4 +491,11 @@ def test_one_expert_layer_has_finite_lora_gradients_and_no_packed_gradients(
     assert all(gradient is not None for gradient in trainable_gradients)
     assert all(torch.isfinite(gradient).all() for gradient in trainable_gradients)
     assert all(torch.count_nonzero(gradient) > 0 for gradient in trainable_gradients)
+    active_experts = torch.unique(top_k_index)
+    inactive = torch.ones(config.num_experts, device="cuda", dtype=torch.bool)
+    inactive[active_experts] = False
+    assert all(
+        torch.count_nonzero(gradient[inactive]) == 0 for gradient in trainable_gradients
+    )
+    assert not any("index_select" in operation for operation in dispatched_ops)
     assert all(parameter.grad is None for parameter in experts.parameters())

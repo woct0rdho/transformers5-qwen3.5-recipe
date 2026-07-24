@@ -508,9 +508,3 @@ def apply_gguf_liger_fused_linear_cross_entropy(
         )
     target.forward = MethodType(gguf_liger_lce_forward, target)
     return target
-
-
-__all__ = [
-    "apply_gguf_liger_fused_linear_cross_entropy",
-    "gguf_liger_lce_forward",
-]

@@ -4,8 +4,14 @@ import torch
 import triton
 import triton.language as tl
 
-_TOP_K = 8
-_HIDDEN_SIZE = 2048
+# Fixed sequence-2048 training geometries:
+# - Qwen batches 1/4/16: [2048|8192|32768, 2048], top-8, with
+#   16,384/65,536/262,144 routed rows.
+# - DeepSeek batches 1/4/16: [2048|8192|32768, 4096], top-6, with
+#   12,288/49,152/196,608 routed rows.
+# The two smaller entries keep the synthetic expert-wrapper regression tests
+# on the same optimized implementation instead of retaining a Torch fallback.
+_SUPPORTED_ROUTING_GEOMETRIES = frozenset({(8, 2048), (6, 4096), (4, 2048), (1, 256)})
 _MAX_TOKENS = 16 * 2048
 
 
@@ -16,13 +22,50 @@ def _is_supported_routing_geometry(
 ) -> bool:
     return (
         0 < num_tokens <= _MAX_TOKENS
-        and num_top_k == _TOP_K
-        and hidden_dim == _HIDDEN_SIZE
+        and (num_top_k, hidden_dim) in _SUPPORTED_ROUTING_GEOMETRIES
     )
 
 
-# Full-width kernels won the gfx1151 sweep; only the warp count scales with T.
-def _routing_launch_warps(num_tokens: int) -> tuple[int, int]:
+# Wide tiles won the gfx1151 sweep for both hidden sizes: gather uses 2,048
+# columns per program, while combine uses the full hidden width. Backward keeps
+# one full-width program per token or sorted route and varies only warp count.
+def _routing_gather_forward_launch(
+    num_tokens: int,
+    top_k: int,
+    hidden_dim: int,
+) -> tuple[int, int]:
+    """Return ``(BLOCK_H, num_warps)`` for fused route gathering."""
+
+    del num_tokens, top_k
+    if hidden_dim >= 2048:
+        return 2048, 8
+    return hidden_dim, 4
+
+
+def _routing_combine_forward_launch(
+    num_tokens: int,
+    top_k: int,
+    hidden_dim: int,
+) -> tuple[int, int]:
+    """Return ``(BLOCK_H, num_warps)`` for fused weighted route combining.
+
+    Production workloads are Qwen ``[T, 2048]`` top-8 and DeepSeek
+    ``[T, 4096]`` top-6 for ``T = 2048, 8192, 32768``.
+    """
+
+    del top_k
+    if hidden_dim >= 4096:
+        return 4096, 8
+    return hidden_dim, 8 if num_tokens <= 2048 else 4
+
+
+def _routing_launch_warps(
+    num_tokens: int,
+    num_top_k: int = 8,
+    hidden_dim: int = 2048,
+) -> tuple[int, int]:
+    if (num_top_k, hidden_dim) == (6, 4096):
+        return 16, 16 if num_tokens <= 4 * 2048 else 8
     if num_tokens <= 2048:
         return 4, 8
     if num_tokens <= 4 * 2048:
@@ -40,7 +83,44 @@ class ExpertRoutingPlan:
     num_tokens: int
     num_top_k: int
     hidden_dim: int
-    use_triton: bool
+
+
+@triton.jit
+def _inverse_permutation_kernel(
+    permutation_ptr,
+    inverse_permutation_ptr,
+    NUM_ROUTES: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    offsets = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    mask = offsets < NUM_ROUTES
+    original_routes = tl.load(permutation_ptr + offsets, mask=mask)
+    tl.store(inverse_permutation_ptr + original_routes, offsets, mask=mask)
+
+
+@triton.jit
+def _route_gather_forward_kernel(
+    hidden_states_ptr,
+    permutation_ptr,
+    selected_hidden_states_ptr,
+    HIDDEN: tl.constexpr,
+    TOP_K: tl.constexpr,
+    BLOCK_H: tl.constexpr,
+):
+    sorted_route = tl.program_id(0)
+    hidden_block = tl.program_id(1)
+    hidden_offsets = hidden_block * BLOCK_H + tl.arange(0, BLOCK_H)
+    original_route = tl.load(permutation_ptr + sorted_route)
+    token = original_route // TOP_K
+    values = tl.load(
+        hidden_states_ptr + token * HIDDEN + hidden_offsets,
+        mask=hidden_offsets < HIDDEN,
+    )
+    tl.store(
+        selected_hidden_states_ptr + sorted_route * HIDDEN + hidden_offsets,
+        values,
+        mask=hidden_offsets < HIDDEN,
+    )
 
 
 @triton.jit
@@ -53,8 +133,13 @@ def _route_gather_backward_kernel(
 ):
     token = tl.program_id(0)
     hidden_offsets = tl.arange(0, HIDDEN_SIZE)
-    route_offsets = token * TOP_K + tl.arange(0, TOP_K)
-    remaining_positions = tl.load(inverse_permutation + route_offsets)
+    route_ranks = tl.arange(0, 8)
+    route_offsets = token * TOP_K + route_ranks
+    remaining_positions = tl.load(
+        inverse_permutation + route_offsets,
+        mask=route_ranks < TOP_K,
+        other=0x7FFFFFFF,
+    )
     reduced = tl.zeros((HIDDEN_SIZE,), dtype=tl.float32)
 
     # PyTorch's sorted index backward rounds the destination to BF16 after
@@ -72,6 +157,41 @@ def _route_gather_backward_kernel(
         )
 
     tl.store(grad_hidden + token * HIDDEN_SIZE + hidden_offsets, reduced)
+
+
+@triton.jit
+def _route_combine_forward_kernel(
+    output_ptr,
+    routing_weights_ptr,
+    inverse_permutation_ptr,
+    result_ptr,
+    HIDDEN: tl.constexpr,
+    TOP_K: tl.constexpr,
+    BLOCK_H: tl.constexpr,
+):
+    token = tl.program_id(0)
+    hidden_block = tl.program_id(1)
+    hidden_offsets = hidden_block * BLOCK_H + tl.arange(0, BLOCK_H)
+    hidden_mask = hidden_offsets < HIDDEN
+    route_base = token * TOP_K
+    accumulated = tl.zeros((BLOCK_H,), dtype=tl.float32)
+    for route_rank in tl.static_range(0, TOP_K):
+        original_route = route_base + route_rank
+        sorted_route = tl.load(inverse_permutation_ptr + original_route)
+        values = tl.load(
+            output_ptr + sorted_route * HIDDEN + hidden_offsets,
+            mask=hidden_mask,
+            other=0.0,
+        ).to(tl.float32)
+        weight = (
+            tl.load(routing_weights_ptr + original_route).to(tl.bfloat16).to(tl.float32)
+        )
+        accumulated += values * weight
+    tl.store(
+        result_ptr + token * HIDDEN + hidden_offsets,
+        accumulated,
+        mask=hidden_mask,
+    )
 
 
 @triton.jit
@@ -97,12 +217,12 @@ def _route_combine_backward_kernel(
     weight = tl.load(routing_weights + original_route).to(tl.bfloat16).to(tl.float32)
 
     output_grad = (grad * weight).to(tl.bfloat16)
-    weight_grad_product = (grad * output).to(tl.bfloat16).to(tl.float32)
+    weight_grad_product = grad * output
     tl.store(
         grad_expert_output + sorted_route * HIDDEN_SIZE + hidden_offsets,
         output_grad,
     )
-    weight_grad = tl.sum(weight_grad_product, axis=0).to(tl.bfloat16).to(tl.float32)
+    weight_grad = tl.sum(weight_grad_product, axis=0)
     tl.store(grad_routing_weights + original_route, weight_grad)
 
 
@@ -116,11 +236,30 @@ class _RouteGather(torch.autograd.Function):
     ) -> torch.Tensor:
         num_tokens, hidden_dim = hidden_states.shape
         num_top_k = permutation.numel() // num_tokens
-        gather_warps, _ = _routing_launch_warps(num_tokens)
+        gather_warps, _ = _routing_launch_warps(num_tokens, num_top_k, hidden_dim)
+        block_h, forward_warps = _routing_gather_forward_launch(
+            num_tokens, num_top_k, hidden_dim
+        )
+        selected_hidden_states = torch.empty(
+            (permutation.numel(), hidden_dim),
+            dtype=hidden_states.dtype,
+            device=hidden_states.device,
+        )
+        _route_gather_forward_kernel[
+            (permutation.numel(), triton.cdiv(hidden_dim, block_h))
+        ](
+            hidden_states,
+            permutation,
+            selected_hidden_states,
+            HIDDEN=hidden_dim,
+            TOP_K=num_top_k,
+            BLOCK_H=block_h,
+            num_warps=forward_warps,
+        )
         ctx.save_for_backward(inverse_permutation)
         ctx.routing_geometry = (num_tokens, num_top_k, hidden_dim)
         ctx.gather_warps = gather_warps
-        return hidden_states[permutation // num_top_k]
+        return selected_hidden_states
 
     @staticmethod
     def backward(ctx, grad_selected: torch.Tensor):
@@ -157,16 +296,29 @@ class _RouteCombine(torch.autograd.Function):
     ) -> torch.Tensor:
         num_tokens, num_top_k = routing_weights.shape
         hidden_dim = expert_output.shape[1]
-        _, combine_warps = _routing_launch_warps(num_tokens)
+        _, combine_warps = _routing_launch_warps(num_tokens, num_top_k, hidden_dim)
+        block_h, forward_warps = _routing_combine_forward_launch(
+            num_tokens, num_top_k, hidden_dim
+        )
+        result = torch.empty(
+            (num_tokens, hidden_dim),
+            dtype=expert_output.dtype,
+            device=expert_output.device,
+        )
+        _route_combine_forward_kernel[(num_tokens, triton.cdiv(hidden_dim, block_h))](
+            expert_output,
+            routing_weights,
+            inverse_permutation,
+            result,
+            HIDDEN=hidden_dim,
+            TOP_K=num_top_k,
+            BLOCK_H=block_h,
+            num_warps=forward_warps,
+        )
         ctx.save_for_backward(expert_output, routing_weights, permutation)
         ctx.routing_geometry = (num_tokens, num_top_k, hidden_dim)
         ctx.combine_warps = combine_warps
-        sorted_weights = routing_weights.reshape(-1)[permutation].to(
-            expert_output.dtype
-        )
-        weighted_output = expert_output * sorted_weights.unsqueeze(-1)
-        token_order = weighted_output[inverse_permutation]
-        return token_order.view(num_tokens, num_top_k, hidden_dim).sum(dim=1)
+        return result
 
     @staticmethod
     def backward(ctx, grad_final: torch.Tensor):
@@ -195,24 +347,33 @@ class _RouteCombine(torch.autograd.Function):
         )
 
 
-def _can_use_triton_routing(
+def _validate_optimized_routing(
     hidden_states: torch.Tensor,
     top_k_index: torch.Tensor,
     top_k_weights: torch.Tensor,
-) -> bool:
+) -> None:
     num_tokens, hidden_dim = hidden_states.shape
     num_top_k = top_k_index.shape[1]
-    return (
-        _is_supported_routing_geometry(num_tokens, num_top_k, hidden_dim)
-        and hidden_states.device.type == "cuda"
-        and hidden_states.dtype == torch.bfloat16
-        and hidden_states.is_contiguous()
-        and top_k_index.device == hidden_states.device
-        and top_k_weights.device == hidden_states.device
-        and top_k_weights.shape == top_k_index.shape
-        and top_k_index.dtype in (torch.int32, torch.int64)
-        and top_k_weights.dtype in (torch.bfloat16, torch.float32)
-    )
+    if not _is_supported_routing_geometry(num_tokens, num_top_k, hidden_dim):
+        raise RuntimeError(
+            "Unsupported optimized expert-routing geometry. Production requires "
+            "Qwen top-8/hidden-2048 or DeepSeek top-6/hidden-4096 with at most "
+            "32,768 tokens."
+        )
+    if hidden_states.device.type != "cuda":
+        raise RuntimeError("Optimized expert routing requires CUDA/ROCm tensors.")
+    if hidden_states.dtype != torch.bfloat16 or not hidden_states.is_contiguous():
+        raise RuntimeError(
+            "Optimized expert routing requires contiguous BF16 hidden states."
+        )
+    if top_k_index.device != hidden_states.device:
+        raise RuntimeError("Expert indices must be on the hidden-state device.")
+    if top_k_weights.device != hidden_states.device:
+        raise RuntimeError("Routing weights must be on the hidden-state device.")
+    if top_k_index.dtype not in (torch.int32, torch.int64):
+        raise RuntimeError("Expert indices must use int32 or int64.")
+    if top_k_weights.dtype not in (torch.bfloat16, torch.float32):
+        raise RuntimeError("Routing weights must use BF16 or FP32.")
 
 
 def prepare_expert_routing(
@@ -239,21 +400,21 @@ def prepare_expert_routing(
     expert_indices, permutation = torch.sort(top_k_index.reshape(-1))
     permutation = permutation.contiguous()
     inverse_permutation = torch.empty_like(permutation)
-    inverse_permutation[permutation] = torch.arange(
-        permutation.numel(),
-        device=permutation.device,
-        dtype=permutation.dtype,
+    inverse_block = 256
+    _inverse_permutation_kernel[(triton.cdiv(permutation.numel(), inverse_block),)](
+        permutation,
+        inverse_permutation,
+        NUM_ROUTES=permutation.numel(),
+        BLOCK=inverse_block,
+        num_warps=4,
     )
     routing_weights = top_k_weights.contiguous()
-    use_triton = _can_use_triton_routing(hidden_states, top_k_index, routing_weights)
-    if use_triton:
-        selected_hidden_states = _RouteGather.apply(
-            hidden_states,
-            permutation,
-            inverse_permutation,
-        )
-    else:
-        selected_hidden_states = hidden_states[permutation // num_top_k]
+    _validate_optimized_routing(hidden_states, top_k_index, routing_weights)
+    selected_hidden_states = _RouteGather.apply(
+        hidden_states,
+        permutation,
+        inverse_permutation,
+    )
 
     return ExpertRoutingPlan(
         selected_hidden_states=selected_hidden_states,
@@ -264,7 +425,6 @@ def prepare_expert_routing(
         num_tokens=num_tokens,
         num_top_k=num_top_k,
         hidden_dim=hidden_dim,
-        use_triton=use_triton,
     )
 
 
@@ -274,43 +434,26 @@ def finalize_expert_routing(
     routing_plan: ExpertRoutingPlan,
     output_mask: torch.Tensor | None,
 ) -> torch.Tensor:
-    use_triton = (
-        routing_plan.use_triton
-        and output_mask is None
-        and output.device.type == "cuda"
-        and output.dtype == torch.bfloat16
-        and output.is_contiguous()
-        and tuple(output.shape)
-        == (
-            routing_plan.num_tokens * routing_plan.num_top_k,
-            routing_plan.hidden_dim,
-        )
+    if output_mask is not None:
+        raise RuntimeError("Optimized expert routing does not support output masks.")
+    expected_shape = (
+        routing_plan.num_tokens * routing_plan.num_top_k,
+        routing_plan.hidden_dim,
     )
-    if use_triton:
-        result = _RouteCombine.apply(
-            output,
-            routing_plan.routing_weights,
-            routing_plan.permutation,
-            routing_plan.inverse_permutation,
+    if (
+        output.device.type != "cuda"
+        or output.dtype != torch.bfloat16
+        or not output.is_contiguous()
+        or tuple(output.shape) != expected_shape
+    ):
+        raise RuntimeError(
+            "Optimized expert combine requires contiguous CUDA BF16 output with "
+            f"shape {expected_shape}, got {tuple(output.shape)}."
         )
-    else:
-        routing_weights = routing_plan.routing_weights.reshape(-1)[
-            routing_plan.permutation
-        ].to(output.dtype)
-        result = output * routing_weights.unsqueeze(-1)
-        if output_mask is not None:
-            result.masked_fill_(output_mask, 0.0)
-        result = result[routing_plan.inverse_permutation]
-        result = result.view(
-            routing_plan.num_tokens,
-            routing_plan.num_top_k,
-            routing_plan.hidden_dim,
-        ).sum(dim=1)
+    result = _RouteCombine.apply(
+        output,
+        routing_plan.routing_weights,
+        routing_plan.permutation,
+        routing_plan.inverse_permutation,
+    )
     return result.to(hidden_states.dtype)
-
-
-__all__ = [
-    "ExpertRoutingPlan",
-    "finalize_expert_routing",
-    "prepare_expert_routing",
-]

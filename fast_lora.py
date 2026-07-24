@@ -21,6 +21,15 @@ from torch_ggml_ops import mmq
 from transformers.integrations.gguf import GGUFLinear
 from transformers.integrations.gguf_dequant import GGUFQuantizedTensor
 
+# GGML quantization type IDs supported by the installed torch-ggml-ops wheel.
+# The original Qwen integration covered IQ2_S/Q3_K/Q4_K/Q5_K/Q6_K.  The
+# DeepSeek-V4 wheel adds Q8_0, Q2_K, and IQ2_XXS.
+_NATIVE_MMQ_QUANT_TYPES = frozenset({8, 10, 11, 12, 13, 14, 16, 22})
+
+
+def supports_native_mmq(weight: GGUFQuantizedTensor) -> bool:
+    return int(weight.quant_type) in _NATIVE_MMQ_QUANT_TYPES
+
 
 def _fused_lora_add(
     result: torch.Tensor,
@@ -118,8 +127,8 @@ class FastLoraLinear(_FastLoraForwardMixin, PeftLinear):
 class FastGGUFLoraLinear(FastLoraLinear):
     """Fast LoRA wrapper for frozen packed ``GGUFLinear`` modules.
 
-    The base call uses dense MMQ in both directions: WnA8 forward and the
-    exact packed BF16-WMMA logical input Jacobian registered by torch-ggml-ops.
+    Supported quantization types use dense MMQ in both directions. Other
+    packed types stay on ``GGUFLinear.forward`` and its generic input Jacobian.
     """
 
     def _base_layer_forward(
@@ -128,6 +137,7 @@ class FastGGUFLoraLinear(FastLoraLinear):
         base = self.base_layer
         if (
             not isinstance(base.weight, GGUFQuantizedTensor)
+            or not supports_native_mmq(base.weight)
             or base.input_permutation is not None
             or base.output_permutation is not None
         ):
@@ -188,10 +198,3 @@ def register_fast_lora(lora_config: LoraConfig) -> LoraConfig:
         }
     )
     return lora_config
-
-
-__all__ = [
-    "FastGGUFLoraLinear",
-    "FastLoraLinear",
-    "register_fast_lora",
-]
