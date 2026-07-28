@@ -13,12 +13,12 @@ from peft import LoraConfig, TaskType, get_peft_model
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
-    Trainer,
     TrainingArguments,
     default_data_collator,
     set_seed,
 )
 
+from bf16_adapter_trainer import BF16AdapterTrainer
 from deepseek_v4_attention import configure_deepseek_v4_attention
 from deepseek_v4_liger_loss import apply_deepseek_v4_liger_loss
 from deepseek_v4_liger_mhc import configure_deepseek_v4_liger_mhc
@@ -125,7 +125,7 @@ def main():
         report_to="wandb",
         seed=random_seed,
     )
-    trainer = Trainer(
+    trainer = BF16AdapterTrainer(
         model=model,
         processing_class=tokenizer,
         train_dataset=dataset,

@@ -13,13 +13,13 @@ from peft import LoraConfig, TaskType, get_peft_model
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
-    Trainer,
     TrainingArguments,
     default_data_collator,
     set_seed,
 )
 
 from attention_aiter_tuning import configure_qwen35_flash_attention_2
+from bf16_adapter_trainer import BF16AdapterTrainer
 from fast_lora import register_fast_lora
 from fast_moe_lora import register_fast_moe_lora
 from fast_moe_ranking import configure_fast_moe_ranking
@@ -149,7 +149,7 @@ def main():
         report_to="wandb",
         seed=random_seed,
     )
-    trainer = Trainer(
+    trainer = BF16AdapterTrainer(
         model=model,
         processing_class=tokenizer,
         train_dataset=dataset,
