@@ -22,7 +22,7 @@ from transformers.integrations.gguf import GGUFLinear
 from transformers.integrations.gguf_dequant import GGUFQuantizedTensor
 
 # GGML quantization type IDs supported by the installed torch-ggml-ops wheel.
-# The original Qwen integration covered IQ2_S/Q3_K/Q4_K/Q5_K/Q6_K.  The
+# The original Qwen integration covered IQ2_S/Q3_K/Q4_K/Q5_K/Q6_K. The
 # DeepSeek-V4 wheel adds Q8_0, Q2_K, and IQ2_XXS.
 _NATIVE_MMQ_QUANT_TYPES = frozenset({8, 10, 11, 12, 13, 14, 16, 22})
 
@@ -186,8 +186,8 @@ def register_fast_lora(lora_config: LoraConfig) -> LoraConfig:
     register = getattr(lora_config, "_register_custom_module", None)
     if register is None:
         raise RuntimeError(
-            "This PEFT version has no LoraConfig._register_custom_module API; "
-            "cannot install fast LoRA without a global monkey patch."
+            "This PEFT version has no LoraConfig._register_custom_module API. "
+            "Cannot install fast LoRA without a global monkey patch."
         )
 
     # GGUFLinear subclasses nn.Linear, so its merge-safe wrapper must be checked first.

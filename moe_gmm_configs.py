@@ -1,5 +1,3 @@
-"""gfx1151 AITER grouped-GEMM configs for the routed training shapes."""
-
 from typing import TypeAlias
 
 ConfigValues: TypeAlias = tuple[int, int, int, int, int, int, int]
@@ -9,7 +7,7 @@ ConfigValues: TypeAlias = tuple[int, int, int, int, int, int, int]
 #   DeepSeek   12,288 / 49,152 / 196,608 (top-6)
 #   Qwen       16,384 / 65,536 / 262,144 (top-8)
 #
-# GMM T denotes a transposed factor/weight view; GMM N is row-major. PTGMM uses
+# GMM T denotes a transposed factor/weight view. GMM N is row-major. PTGMM uses
 # a transposed row-major lhs. Rank-4 LoRA target KxN shapes are:
 #   DeepSeek T: 4096x4, 2048x4, 4x4096
 #            N: 4x4096, 4x2048, 4096x4
@@ -114,7 +112,7 @@ _GMM_TUNED_CONFIGS: dict[tuple[int, int, int, bool], ConfigValues] = {
 }
 
 # PTGMM production and baseline calls use a transposed row-major lhs. Keys are
-# (total routed rows, K, N); values follow _CONFIG_KEYS.
+# (total routed rows, K, N). Values follow _CONFIG_KEYS.
 _PTGMM_TUNED_CONFIGS: dict[tuple[int, int, int], ConfigValues] = {
     # DeepSeek, physical batch 1 / 4 / 16.
     (12288, 4096, 4): (32, 256, 16, 1, 256, 4, 1),

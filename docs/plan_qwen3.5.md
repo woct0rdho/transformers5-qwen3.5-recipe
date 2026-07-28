@@ -282,9 +282,9 @@ The kernel-family totals are:
 Backward-phase totals include checkpoint recomputation. The remaining leading opportunities are GatedDeltaNet/FLA, grouped-MMQ input gradients, GEMM, and Flash Attention.
 
 Profile artifacts:
-- refined report: `/tmp/qwen35_training_step_profile_refined_routing.json`.
-- Chrome/Kineto trace: `/tmp/qwen35_training_step_trace_routing.json`.
-- reproduction driver: `/tmp/profile_qwen35_training_step.py`.
+- refined report: `~/tmp/test_no_unsloth/qwen35_training_step_profile_refined_routing.json`.
+- Chrome/Kineto trace: `~/tmp/test_no_unsloth/qwen35_training_step_trace_routing.json`.
+- reproduction driver: `~/tmp/test_no_unsloth/profile_qwen35_training_step.py`.
 
 ## Remaining work
 

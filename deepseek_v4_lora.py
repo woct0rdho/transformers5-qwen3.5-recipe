@@ -1,5 +1,3 @@
-"""DeepSeek V4 ordinary LoRA registration and injection audits."""
-
 import re
 from types import MethodType
 from typing import Any
@@ -97,9 +95,9 @@ def _deepseek_v4_fixed_grouped_mmq_forward(
 
     ``GGUFGroupedLinear`` exposes a public ``[... , 8, 4096] -> [..., 8,
     1024]`` projection while its packed parameter is a flattened physical
-    ``[8192, 4352]`` payload.  Flattening it through ``GGUFLinear`` would lose
+    ``[8192, 4352]`` payload. Flattening it through ``GGUFLinear`` would lose
     the group boundary and the stock Transformers autograd path materializes
-    the whole logical matrix.  The fixed grouped operator owns that layout.
+    the whole logical matrix. The fixed grouped operator owns that layout.
     """
 
     original_input_dtype = input.dtype

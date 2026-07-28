@@ -772,8 +772,8 @@ def register_fast_moe_lora(
     register = getattr(lora_config, "_register_custom_module", None)
     if register is None:
         raise RuntimeError(
-            "This PEFT version has no LoraConfig._register_custom_module API; "
-            "cannot install fast GGUF MoE LoRA without a global PEFT monkey patch."
+            "This PEFT version has no LoraConfig._register_custom_module API. "
+            "Cannot install fast GGUF MoE LoRA without a global PEFT monkey patch."
         )
     if lora_config.target_parameters:
         raise ValueError(

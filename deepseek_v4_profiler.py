@@ -1,5 +1,3 @@
-"""Kineto full-step profiling using the established Qwen training workflow."""
-
 import json
 from collections.abc import Callable
 from contextlib import contextmanager

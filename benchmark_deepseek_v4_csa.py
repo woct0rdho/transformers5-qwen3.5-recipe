@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Correctness, timing, and allocation harness for fixed-shape DeepSeek V4 CSA."""
 
 import argparse
 import gc
@@ -41,7 +40,7 @@ def reference_csa_attention(
     sink: torch.Tensor,
     block_m: int = 32,
 ) -> torch.Tensor:
-    """Blockwise FP32 oracle; inputs are BHSD and output is BSHD."""
+    """Blockwise FP32 oracle. Inputs are BHSD and output is BSHD."""
     outputs = []
     scale = 1.0 / math.sqrt(_HEAD_DIM)
     for query_start in range(0, _SEQUENCE_LENGTH, block_m):

@@ -1,9 +1,3 @@
-"""Fixed-shape DeepSeek V4 heavily compressed attention for gfx1151.
-
-The family path owns non-overlapping rate-128 compression and one shared
-online softmax over local KV, 16 compressed KV entries, and attention sinks.
-"""
-
 import math
 from typing import Any
 

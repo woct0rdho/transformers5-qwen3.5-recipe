@@ -138,7 +138,7 @@ def test_fixed_grouped_q8_0_mmq_matches_dense_packed_reference() -> None:
     )
     reference.backward(grad_output)
 
-    # Both paths use the same packed Q8_0 dense MMQ arithmetic.  Exact equality
+    # Both paths use the same packed Q8_0 dense MMQ arithmetic. Exact equality
     # is a stronger check than an independent dequantized BF16 tolerance here.
     torch.testing.assert_close(actual, reference, rtol=0, atol=0)
     torch.testing.assert_close(actual_grad, hidden_reference.grad, rtol=0, atol=0)

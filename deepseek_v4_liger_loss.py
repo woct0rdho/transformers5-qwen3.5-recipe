@@ -1,9 +1,9 @@
 """DeepSeek V4 Liger losses, including the packed Q8_0 LM-head path.
 
-The reference helper intentionally remains available for correctness audits.  The
+The reference helper intentionally remains available for correctness audits. The
 model-instance patch uses the packed helper by default: it quantizes bounded
 BF16 hidden-state chunks, runs Liger cross-entropy in place, and computes the
-frozen Q8_0 head's input gradient directly from the packed payload.  No logical
+frozen Q8_0 head's input gradient directly from the packed payload. No logical
 vocabulary matrix or full-sequence logits tensor is created during training.
 """
 
@@ -105,7 +105,7 @@ def _packed_q8_linear_cross_entropy_forward(
 
     rows = input.shape[0]
     target_mask = target != ignore_index
-    # Liger's kernel needs the total non-ignored count for each chunk.  This is
+    # Liger's kernel needs the total non-ignored count for each chunk. This is
     # a scalar metadata read, not a logits or weight materialization.
     total_n_non_ignore = target_mask.sum().item()
     block_size = min(MAX_FUSED_SIZE, triton.next_power_of_2(out_features))
@@ -114,7 +114,7 @@ def _packed_q8_linear_cross_entropy_forward(
     loss_1d = torch.zeros(rows, dtype=torch.float32, device=input.device)
     for start in range(0, rows, chunk_size):
         end = min(start + chunk_size, rows)
-        # MMQ deliberately rejects nonzero storage offsets.  The explicit
+        # MMQ deliberately rejects nonzero storage offsets. The explicit
         # clone is bounded by the selected loss chunk, not the full sequence.
         input_chunk = input[start:end].clone()
         logits_chunk = torch.ops.torch_ggml_ops.mmq.default(

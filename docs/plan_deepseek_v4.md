@@ -8,20 +8,19 @@ The project trains `DeepseekV4ForCausalLM` from the frozen local GGUF checkpoint
 |---|---|
 | Packed GGUF load and payload audit | Complete |
 | Dense and grouped packed MMQ | Complete |
-| Packed LM-head loss | Complete and mandatory |
+| Packed LM-head loss | Complete |
 | Ordinary rank-4 LoRA | Complete |
 | Full-256-group routed-expert LoRA | Complete |
-| Target-specific AITER GMM/PTGMM dispatch | Complete for DeepSeek and Qwen B1/B4/B16 shapes |
+| Target-specific AITER GMM/PTGMM dispatch | Complete |
 | Top-k ranking, route gather, and route combine | Complete |
 | Frozen-weight RMSNorm | Complete |
 | mHC layer and head kernels | Complete |
-| Sliding attention | Complete at B1/B4/B16 |
-| Compressed sparse attention (CSA) | Complete at B1/B4/B16 |
-| Heavily compressed attention (HCA) | Complete at B1/B4/B16 |
-| Final physical-B1/S2048 model audit and profile | Passed |
-| Physical-B4/S2048 full update | Pending |
-| Physical-B16/S2048 full update | Pending |
-| Batch-16 low-memory policy | Pending measured need |
+| Sliding attention | Complete |
+| Compressed sparse attention (CSA) | Complete |
+| Heavily compressed attention (HCA) | Complete |
+| Final physical-B1 model audit and profile | Complete |
+| Physical-B4/B16 full update | Pending |
+| Batch-16 low-memory policy | Pending |
 | llama.cpp adapter conversion and cross-check | Pending |
 
 The production stack is assembled and accepted at physical B1/S2048. The next milestone is a physical B4 update followed by the initial physical B16 attempt. No new standalone kernel tuning or low-memory policy should precede those measurements.
@@ -37,33 +36,32 @@ The frozen checkpoint is:
 ```
 
 The fixed model geometry is:
-
-- 43 decoder layers;
-- hidden size 4,096;
-- vocabulary size 129,280;
-- four mHC residual streams and 20 Sinkhorn iterations;
-- 64 query heads, head dimension 512, and one shared K=V head;
-- Q projection path `4096 -> 1024 -> 32768`;
-- eight grouped output-A projections, each `4096 -> 1024`;
-- output-B projection `8192 -> 4096`;
-- 256 routed experts per layer with top-six selection;
-- routed expert dimensions `4096 -> 2048 -> 4096`;
-- one shared expert per layer;
-- three hash-routed layers and 40 learned-router layers;
-- clamped split SwiGLU with limit 10.0;
-- two sliding, 21 CSA, and 20 HCA attention layers;
-- sliding window 128;
-- CSA compression rate 4 and 512 compressed entries;
+- 43 decoder layers.
+- hidden size 4,096.
+- vocabulary size 129,280.
+- four mHC residual streams and 20 Sinkhorn iterations.
+- 64 query heads, head dimension 512, and one shared K=V head.
+- Q projection path `4096 -> 1024 -> 32768`.
+- eight grouped output-A projections, each `4096 -> 1024`.
+- output-B projection `8192 -> 4096`.
+- 256 routed experts per layer with top-six selection.
+- routed expert dimensions `4096 -> 2048 -> 4096`.
+- one shared expert per layer.
+- three hash-routed layers and 40 learned-router layers.
+- clamped split SwiGLU with limit 10.0.
+- two sliding, 21 CSA, and 20 HCA attention layers.
+- sliding window 128.
+- CSA compression rate 4 and 512 compressed entries.
 - HCA compression rate 128 and 16 non-overlapping compressed entries.
 
 ### Target workload
 
-- device `cuda:0`, architecture `gfx1151`, wave32, 64 KiB LDS limit;
-- BF16 activations and rank-4 BF16 adapters;
-- sequence length 2,048;
-- physical batches 1, 4, and 16;
-- no CPU offload;
-- per-decoder-layer non-reentrant checkpointing;
+- device `cuda:0`, architecture `gfx1151`, wave32, 64 KiB LDS limit.
+- BF16 activations and rank-4 BF16 adapters.
+- sequence length 2,048.
+- physical batches 1, 4, and 16.
+- no CPU offload.
+- per-decoder-layer non-reentrant checkpointing.
 - checkpoint-specific packed tensor types and shapes.
 
 | Physical batch | Tokens | Selected route rows | Mean rows per expert | LM-loss rows |
@@ -85,24 +83,22 @@ Important BF16 activation sizes:
 ### Adapter surface
 
 The accepted adapter surface contains:
-
-- 383 ordinary LoRA wrappers;
-- 43 complete routed-expert wrappers;
-- 426 wrapped modules;
-- 938 trainable adapter tensors;
+- 383 ordinary LoRA wrappers.
+- 43 complete routed-expert wrappers.
+- 426 wrapped modules.
+- 938 trainable adapter tensors.
 - 645,609,472 BF16 parameters, approximately 1.20 GiB before gradients and optimizer state.
 
 Ordinary targets include Q-A, Q-B, KV, output-B, compressor KV/gate, and shared-expert gate/up/down projections. Routed wrappers preserve combined gate/up factors, DeepSeek clamping, expert-major planes, and packed base projections.
 
 The following remain frozen and adapter-free:
-
-- grouped `o_a_proj`;
-- indexer projections;
-- learned and hash router weights;
-- norm scales;
-- mHC controls;
-- attention sinks and position biases;
-- token embeddings;
+- grouped `o_a_proj`.
+- indexer projections.
+- learned and hash router weights.
+- norm scales.
+- mHC controls.
+- attention sinks and position biases.
+- token embeddings.
 - packed LM-head weights.
 
 Grouped `o_a_proj` is a three-dimensional eight-group boundary, not an ordinary two-dimensional linear layer. It remains explicitly unsupported for LoRA until the training representation, converter, and llama.cpp loader all support the same eight independent factor pairs.
@@ -115,7 +111,7 @@ Grouped `o_a_proj` is a three-dimensional eight-group boundary, not an ordinary 
 - FP32 sinks, LSE, Delta, RMS reductions, softmax reductions, and deterministic compact-KV reductions are preserved.
 - RMSNorm-to-RoPE boundaries remain BF16. Input RoPE is partial and output rotation is conjugate.
 - Sliding, CSA, and HCA own separate dispatch, launch tables, workspaces, score layouts, and custom backward paths.
-- Attention raw FP16 scores are overwritten in place with `dS`. One backward is supported per forward or checkpoint replay; repeated backward through one retained graph is unsupported.
+- Attention raw FP16 scores are overwritten in place with `dS`. One backward is supported per forward or checkpoint replay. Repeated backward through one retained graph is unsupported.
 - Shared K=V gradients are combined directly without repeated KV heads.
 - Unsupported architecture, batch, sequence, layout, dtype, mask, cache, or grouped-GEMM shape fails closed.
 - `TrainingArguments(use_liger_kernel=False)` remains required. DeepSeek-specific RMSNorm, mHC, and loss integrations are project-local.
@@ -132,14 +128,13 @@ The authoritative model-level boundary is physical B1/S2048 with 43 non-reentran
 | Kineto traced | 5.962 s | 12.744 s | 33.3 ms | 109.7 ms | 18.849 s | 108.7 tokens/s |
 
 The accepted audit confirms:
-
-- first loss `3.0208380222320557` and post-update second loss `3.009669780731201`;
-- 2 sliding, 21 CSA, and 20 HCA modules use project-owned dispatch;
-- all 469 LoRA-B tensors changed on the first update;
-- all 938 adapter tensors had finite, nonzero gradients on the second backward;
-- all 474 packed parameters retained their payload pointers, versions, storage, and checksums;
-- all 43 grouped output-A modules remained frozen and gradient-free;
-- all 86 mHC connections, 43 decoder boundaries, and the final head were patched before PEFT;
+- first loss `3.0208380222320557` and post-update second loss `3.009669780731201`.
+- 2 sliding, 21 CSA, and 20 HCA modules use project-owned dispatch.
+- all 469 LoRA-B tensors changed on the first update.
+- all 938 adapter tensors had finite, nonzero gradients on the second backward.
+- all 474 packed parameters retained their payload pointers, versions, storage, and checksums.
+- all 43 grouped output-A modules remained frozen and gradient-free.
+- all 86 mHC connections, 43 decoder boundaries, and the final head were patched before PEFT.
 - process swap remained zero.
 
 ### Whole-update attribution
@@ -264,7 +259,6 @@ The path preserves learned-router sqrt-softplus scoring, correction bias, hash r
 - Capability and shape guards fail closed instead of silently dequantizing or copying operands.
 
 Rejected or deferred:
-
 - Production logical dequantization was rejected because it breaks packed-weight ownership and creates persistent logical matrices.
 - Packed transposes, selected-expert weight copies, and packed gradients were rejected because they add recurrent allocation/copy work without changing the frozen base contract.
 - Quantizing backward cotangents was rejected because exact packed input gradients already own the boundary and the additional approximation is unnecessary.
@@ -275,7 +269,6 @@ Rejected or deferred:
 `apply_deepseek_v4_liger_loss()` processes 512 hidden rows at a time, applies packed Q8_0 MMQ, computes fused cross-entropy, and returns the packed hidden-state input gradient. It does not materialize full logits or the approximately 0.99 GiB logical BF16 LM head. Materialized helpers are bounded correctness oracles only.
 
 Rejected or deferred:
-
 - Full-logit loss was rejected because it materializes about 0.49 GiB at B1, 1.97 GiB at B4, and 7.9 GiB at B16 before loss backward.
 - Production LM-head dequantization was rejected because the logical BF16 head is about 0.99 GiB and duplicates the packed frozen source.
 - Materialized loss and dequantization remain test-only oracles and must not become fallback training paths.
@@ -285,33 +278,22 @@ Rejected or deferred:
 Sliding, CSA, and HCA have separate production implementations and launch tables.
 
 Common accepted properties:
-
-- compact shared-KV traversal with no repeated 64-head K/V tensor;
-- no dense attention masks or probability tensors;
-- FP32 online-softmax state and sinks;
-- FP16 raw score storage overwritten in place with `dS`;
-- direct shared K=V gradient accumulation;
-- deterministic sink and compressed-KV reductions;
-- no atomics, global scratch, or full query-sized partial-gradient workspace;
-- at most 64 KiB LDS per retained launch;
-- metadata-only BHSD/BSHD layout handling;
+- compact shared-KV traversal with no repeated 64-head K/V tensor.
+- no dense attention masks or probability tensors.
+- FP32 online-softmax state and sinks.
+- FP16 raw score storage overwritten in place with `dS`.
+- direct shared K=V gradient accumulation.
+- deterministic sink and compressed-KV reductions.
+- no atomics, global scratch, or full query-sized partial-gradient workspace.
+- at most 64 KiB LDS per retained launch.
+- metadata-only BHSD/BSHD layout handling.
 - custom backward and non-reentrant checkpoint replay.
 
 CSA additionally owns rate-4 compression, compressed-position RoPE, fixed-geometry indexer elimination, causal-prefix visibility, batch-specific score storage, and deterministic compressed-gradient partials.
 
 HCA owns rate-128 featurewise compression, 16-entry C128 visibility, producer backward, separate local/compressed score state, and compact deterministic partials. It has no indexer, top-k, overlap, or sentinel path.
 
-Detailed launch ownership remains in:
-
-- [sliding forward](plan_deepseek_v4_sliding_attention_forward.md);
-- [sliding backward](plan_deepseek_v4_sliding_attention_backward.md);
-- [CSA forward](plan_deepseek_v4_csa_forward.md);
-- [CSA backward](plan_deepseek_v4_csa_backward.md);
-- [HCA forward](plan_deepseek_v4_hca_forward.md);
-- [HCA backward](plan_deepseek_v4_hca_backward.md).
-
 Rejected or deferred:
-
 - Stock AITER D512 backward was rejected because it requests 128 KiB LDS, above the retained 64 KiB limit. AITER DSV4 sparse attention was rejected as a training backend because it lacks the required backward and reusable LSE contract.
 - A shared eager, FlexAttention, or generic streaming backend was rejected because it either retained dense/repeated state, failed ROCm lowering for required variants, or lost the complete family boundary. The three attention semantics remain separately owned.
 - Sliding score recomputation, score-disabled backward, and broader fused-gradient variants lost to the retained raw-score-to-`dS` boundary. AITER sliding complete time was about 6.5x slower at the target batches.
@@ -328,11 +310,10 @@ Rejected or deferred:
 - Tie-aware correctness compares selected thresholds and sorted selected weights rather than unstable near-tie expert identities.
 
 Rejected or deferred:
-
 - Exact `torch.topk` expert-ID matching was rejected as a correctness rule because tied or near-tied experts may exchange identity while preserving selected scores and model behavior.
 - Approximate expert selection was rejected. Fixed top-six/hash semantics and selected-score normalization remain exact.
 - Eager gather, inverse permutation, and weighted combine were rejected as production ownership because they materialize intermediates and fragment forward/backward into many generic kernels.
-- Routing is closed as a standalone target; the final trace leaves only 4.3 ms in sort/scan work. Reopen only as part of a measured surrounding fusion.
+- Routing is closed as a standalone target. The final trace leaves only 4.3 ms in sort/scan work. Reopen only as part of a measured surrounding fusion.
 
 ### RMSNorm and mHC
 
@@ -344,7 +325,6 @@ Rejected or deferred:
 - All 86 connections, 43 layer boundaries, and the final head are configured before PEFT and checked after wrapping.
 
 Rejected or deferred:
-
 - Generic model-wide Liger patching was rejected because the installed registry has no DeepSeek V4 contract and cannot preserve project-owned clamp, partial-RoPE, packed-MoE, mHC, and packed-loss behavior.
 - Stock weighted RMSNorm backward was rejected for frozen scales because it allocates and reduces unnecessary `dW` scratch. The retained path computes only `dX`.
 - A grouped-token tensor-core mHC candidate measured about 9.47 ms complete at B1, versus 4.619 ms for the retained token-program boundary.
@@ -357,14 +337,13 @@ Rejected or deferred:
 - Ordinary LoRA uses the existing hipBLASLt BF16 path and fused LoRA-B plus residual addition where applicable.
 - Routed LoRA uses one unconditional full-256-group implementation.
 - Original expert factor planes are passed through supported transpose metadata views.
-- AITER `gmm` computes forward and input gradients; `ptgmm` writes complete expert-major factor gradients directly.
+- AITER `gmm` computes forward and input gradients. `ptgmm` writes complete expert-major factor gradients directly.
 - Exact target dispatch includes row count and RHS layout and rejects unmeasured shapes.
 - PEFT names, rank/alpha scaling, combined gate/up-A semantics, and adapter-only serialization are preserved.
 
 Rejected or deferred:
-
 - Per-route factor `index_select` was rejected because it allocates gathered factor planes and introduces `IndexSelectBackward` zero/scatter work during both original forward and checkpoint replay.
-- A compact/full active-count selector recovered only small component differences. Compact sparse B1 was 2.6% faster for DeepSeek and 2.3% faster for Qwen, but the dual ownership was not justified; one unconditional full-group path is retained.
+- A compact/full active-count selector recovered only small component differences. Compact sparse B1 was 2.6% faster for DeepSeek and 2.3% faster for Qwen, but the dual ownership was not justified. One unconditional full-group path is retained.
 - Implicit `.contiguous()` repair and the square-matrix input-gradient workaround were rejected because they hide unsupported layouts and can introduce copies or incorrect transpose ownership.
 - A general GMM/PTGMM heuristic was rejected because the accepted targets use 57 distinct GMM configs across 66 keys and 27 PTGMM configs across 33 keys, with non-monotonic batch and layout changes. Unmeasured shapes fail closed.
 - Large Cartesian tuning was rejected in favor of bounded one-parameter coordinate slices and interleaved acceptance. Ordinary LoRA GEMM retuning remains closed because hipBLASLt already owns that BF16 boundary.
@@ -374,41 +353,38 @@ Rejected or deferred:
 - Base-model attention, routing, MMQ, RMSNorm, and mHC patches are installed before PEFT.
 - Packed LM-head loss is mandatory.
 - Training keeps `use_liger_kernel=False` because generic Liger has no DeepSeek V4 registry contract.
-- Production contains one retained path per accepted boundary; experimental selectors and losing branches are absent.
-- The repository suite passes `106/106`; Ruff, `py_compile`, and `git diff --check` pass.
+- Production contains one retained path per accepted boundary. Experimental selectors and losing branches are absent.
+- The repository suite passes `106/106`. Ruff, `py_compile`, and `git diff --check` pass.
 
 Rejected or deferred:
-
 - Runtime experimental switches were removed after selection so checkpoint replay and user-facing training cannot diverge from the accepted path.
 - Generic fallbacks that repair unsupported layouts, dequantize packed weights, or silently change model semantics were rejected in favor of explicit failure.
 - Repeated backward through one retained attention graph remains unsupported because forward score storage is intentionally transferred to `dS` ownership. A new forward or checkpoint replay is required.
-- Validation on additional ROCm architectures is deferred; current launch and compiler evidence is specific to `gfx1151`.
+- Validation on additional ROCm architectures is deferred. Current launch and compiler evidence is specific to `gfx1151`.
 
 ## Validation requirements
 
 Every full-model acceptance run must verify:
-
-- finite loss and finite trainable gradients;
-- every expected adapter gradient present;
-- no gradients on packed parameters, norms, routers, mHC controls, embeddings, sinks, or LM head;
-- packed payload pointer, version, storage, and checksum immutability;
-- exact hash-router indices;
-- sorted selected routing-weight agreement for learned routers;
-- all 43 decoder layers using non-reentrant checkpointing;
-- all intended attention modules using project-owned dispatch;
-- no hidden CPU offload or process swap growth;
+- finite loss and finite trainable gradients.
+- every expected adapter gradient present.
+- no gradients on packed parameters, norms, routers, mHC controls, embeddings, sinks, or LM head.
+- packed payload pointer, version, storage, and checksum immutability.
+- exact hash-router indices.
+- sorted selected routing-weight agreement for learned routers.
+- all 43 decoder layers using non-reentrant checkpointing.
+- all intended attention modules using project-owned dispatch.
+- no hidden CPU offload or process swap growth.
 - first-step LoRA-B updates and second-backward nonzero A/B gradients.
 
 Continuous numerical gates are:
-
-- loss relative error at most `5e-3`;
-- final-hidden cosine at least `0.999`;
-- final-hidden relative L2 error at most `3e-2`;
-- concatenated adapter-gradient cosine at least `0.999`;
-- concatenated adapter-gradient relative L2 error at most `3e-2`;
-- major adapter-family cosine at least `0.99`;
-- first-update cosine at least `0.995`;
-- updated-adapter relative L2 error at most `1e-2`;
+- loss relative error at most `5e-3`.
+- final-hidden cosine at least `0.999`.
+- final-hidden relative L2 error at most `3e-2`.
+- concatenated adapter-gradient cosine at least `0.999`.
+- concatenated adapter-gradient relative L2 error at most `3e-2`.
+- major adapter-family cosine at least `0.99`.
+- first-update cosine at least `0.995`.
+- updated-adapter relative L2 error at most `1e-2`.
 - no NaN, Inf, missing, or unexpectedly zero gradient.
 
 For near-tied learned-router selections, compare sorted selected weights without expert IDs. Require cosine at least `0.999`, relative RMSE at most `3e-2`, bounded maximum weight error, and bounded normalized row-sum error. A near-tie exception never permits incomplete or nonfinite gradients.
@@ -422,10 +398,9 @@ Attention component gates additionally require exact-shape output and Q/local-KV
 If B16 does not fit or leaves insufficient operating headroom, test contiguous non-reentrant checkpoint segments of 1, 2, 4, and 8 decoder layers. Measure recomputation time, boundary activation size, peak allocation/reservation, and gradient agreement.
 
 If segmentation is insufficient, attribute the peak before changing code. Candidate policies are:
-
-- stricter lifetime control for attention, route, and mHC workspaces;
-- serialized reuse of temporary workspaces;
-- family-specific reduction of retained LSE, metadata, producer state, or backward scratch;
+- stricter lifetime control for attention, route, and mHC workspaces.
+- serialized reuse of temporary workspaces.
+- family-specific reduction of retained LSE, metadata, producer state, or backward scratch.
 - checkpoint segment placement around expensive CSA/HCA boundaries.
 
 Do not fork mathematical kernels, lower precision, reintroduce dense masks/probabilities, or add CPU offload solely for B16.
@@ -435,16 +410,15 @@ B16 is accepted only after one complete update with finite gradients, immutable 
 ### llama.cpp adapter interoperability
 
 Implement ordinary and routed-expert PEFT-name conversion to llama.cpp GGUF LoRA. Validate:
-
-- ordinary target aliases;
-- combined expert gate/up factor splitting;
-- shared gate/up-A semantics;
-- expert-major three-dimensional layouts;
-- rank/alpha scaling exactly once;
-- missing expert, wrong expert count, and incompatible shape rejection;
-- ordinary-only, expert-only, and combined fixed-prompt outputs;
-- adapter-disabled and scale-zero equivalence;
-- adapter switching with KV/compressor state reset;
+- ordinary target aliases.
+- combined expert gate/up factor splitting.
+- shared gate/up-A semantics.
+- expert-major three-dimensional layouts.
+- rank/alpha scaling exactly once.
+- missing expert, wrong expert count, and incompatible shape rejection.
+- ordinary-only, expert-only, and combined fixed-prompt outputs.
+- adapter-disabled and scale-zero equivalence.
+- adapter switching with KV/compressor state reset.
 - adapter-only save and reload.
 
 Grouped `o_a_proj` must remain explicitly unsupported rather than silently omitted. Adapter merge remains rejected because the frozen source is packed.
@@ -454,9 +428,8 @@ Grouped `o_a_proj` must remain explicitly unsupported rather than silently omitt
 Consider additional fusion only after B4/B16 establishes the next limiting boundary.
 
 Current candidates are:
-
-- BF16 direct copy/conversion and vector-add traffic attributed to its owning packed-input-gradient, residual, LoRA, mHC, or producer boundary;
-- packed-MMQ fusion that removes adjacent quantization, activation, routing, residual, or LoRA traffic;
+- BF16 direct copy/conversion and vector-add traffic attributed to its owning packed-input-gradient, residual, LoRA, mHC, or producer boundary.
+- packed-MMQ fusion that removes adjacent quantization, activation, routing, residual, or LoRA traffic.
 - workspace-lifetime fusion required by a measured B16 peak.
 
 Do not reopen standalone MMQ, grouped MMQ, ordinary LoRA GEMM, routing, RMSNorm, mHC, sliding, CSA, or HCA tuning without complete-boundary evidence. Additional ROCm architecture validation is outside the current scope.
@@ -464,21 +437,19 @@ Do not reopen standalone MMQ, grouped MMQ, ordinary LoRA GEMM, routing, RMSNorm,
 ## Benchmark policy
 
 Component benchmarks must:
-
-- use deterministic BF16 inputs and real packed payloads where applicable;
-- use actual B1/B4/B16 route distributions and exact shapes;
-- run correctness before timing;
-- use at least three warmups and 20 timed samples for small kernels;
-- report median forward, backward, complete time, and incremental peak GiB;
-- validate checkpoint replay and unsupported-shape rejection;
+- use deterministic BF16 inputs and real packed payloads where applicable.
+- use actual B1/B4/B16 route distributions and exact shapes.
+- run correctness before timing.
+- use at least three warmups and 20 timed samples for small kernels.
+- report median forward, backward, complete time, and incremental peak GiB.
+- validate checkpoint replay and unsupported-shape rejection.
 - keep each tuning experiment under five minutes unless separately justified.
 
 Full-model benchmarks must:
-
-- warm one complete update;
-- measure at least three untraced updates for acceptance timing;
-- trace one separate update for attribution;
-- report phase timing, throughput, allocated/reserved GiB, device-free GiB, RSS GiB, and swap;
+- warm one complete update.
+- measure at least three untraced updates for acceptance timing.
+- trace one separate update for attribution.
+- report phase timing, throughput, allocated/reserved GiB, device-free GiB, RSS GiB, and swap.
 - verify gradients, updates, dispatch coverage, and packed immutability on a measured update.
 
 Do not accept isolated throughput that regresses complete-update time, memory, correctness, layout ownership, or model semantics.
@@ -486,35 +457,31 @@ Do not accept isolated throughput that regresses complete-update time, memory, c
 ## Code ownership
 
 Training and full-model audit:
-
-- `train_deepseek_v4.py`;
-- `audit_deepseek_v4_training_step.py`;
+- `train_deepseek_v4.py`.
+- `audit_deepseek_v4_training_step.py`.
 - `deepseek_v4_profiler.py`.
 
 Attention:
-
-- `deepseek_v4_attention.py`;
-- `deepseek_v4_sliding_attention.py`;
-- `deepseek_v4_csa.py`;
-- `deepseek_v4_hca.py`;
-- `benchmark_deepseek_v4_sliding_attention.py`;
-- `benchmark_deepseek_v4_csa.py`;
+- `deepseek_v4_attention.py`.
+- `deepseek_v4_sliding_attention.py`.
+- `deepseek_v4_csa.py`.
+- `deepseek_v4_hca.py`.
+- `benchmark_deepseek_v4_sliding_attention.py`.
+- `benchmark_deepseek_v4_csa.py`.
 - `benchmark_deepseek_v4_hca.py`.
 
 Adapters and grouped GEMM:
-
-- `deepseek_v4_lora.py`;
-- `deepseek_v4_moe_lora.py`;
-- `fast_moe_lora.py`;
+- `deepseek_v4_lora.py`.
+- `deepseek_v4_moe_lora.py`.
+- `fast_moe_lora.py`.
 - `moe_gmm_configs.py`.
 
 Packed loss, routing, norm, and mHC:
-
-- `deepseek_v4_liger_loss.py`;
-- `deepseek_v4_liger_rmsnorm.py`;
-- `deepseek_v4_liger_mhc.py`;
-- `deepseek_v4_routing.py`;
-- `fast_moe_ranking.py`;
+- `deepseek_v4_liger_loss.py`.
+- `deepseek_v4_liger_rmsnorm.py`.
+- `deepseek_v4_liger_mhc.py`.
+- `deepseek_v4_routing.py`.
+- `fast_moe_ranking.py`.
 - `fast_moe_routing.py`.
 
 Focused tests are co-located as `test_*.py`. Attention implementation detail and retained launch tables live in the six focused attention plans linked above.

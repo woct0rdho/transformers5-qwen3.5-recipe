@@ -1,10 +1,3 @@
-"""Fixed-shape DeepSeek V4 compressed sparse attention for gfx1151.
-
-The final attention consumes separate local and rate-4 compressed shared-KV
-regions. The compressor keeps DeepSeek's previous-Ca/current-Cb overlap,
-featurewise softmax, RMSNorm, and compressed-position partial RoPE semantics.
-"""
-
 import math
 from typing import Any
 

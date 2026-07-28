@@ -1,5 +1,3 @@
-"""Project-local fixed-shape DeepSeek V4 attention dispatch."""
-
 import math
 import types
 from typing import Any
@@ -55,7 +53,7 @@ def _canonical_training_mask(
 
     The model input hook has already rejected padding, caches, and noncanonical
     positions. Compressed families validate this metadata but do not read it in
-    their family-owned kernels; sliding attention ignores it.
+    their family-owned kernels. Sliding attention ignores it.
     """
 
     if batch_size not in _SUPPORTED_BATCHES:
@@ -79,7 +77,7 @@ def _canonical_training_mask(
         raise ValueError("DeepSeek V4 attention requires a canonical mask function")
 
     # The mask is batch-independent after the input hook proves no padding.
-    # Keep one physical [1,1,S,S] tensor as the canonical proof; family-owned
+    # Keep one physical [1,1,S,S] tensor as the canonical proof. Family-owned
     # kernels validate its view metadata without reading the mask data.
     base_mask = eager_mask(
         batch_size=1,

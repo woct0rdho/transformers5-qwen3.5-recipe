@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Correctness and timing harness for fixed-shape DeepSeek V4 sliding attention."""
 
 import argparse
 import gc

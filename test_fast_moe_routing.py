@@ -207,7 +207,7 @@ def test_route_combine_forward_and_backward_match_reference(
     expected = expected[inverse_permutation]
     expected = expected.view(_TOKENS, _TOP_K, _HIDDEN).sum(dim=1)
     # The fused kernel accumulates weighted BF16 expert outputs in FP32 before
-    # the final BF16 store; this is more accurate but can differ by one BF16 step.
+    # the final BF16 store. This is more accurate but can differ by one BF16 step.
     torch.testing.assert_close(actual, expected, rtol=0, atol=0.015625)
 
     grad_final = torch.randn(

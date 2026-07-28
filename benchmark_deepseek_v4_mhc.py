@@ -1,9 +1,4 @@
-"""Standalone DeepSeek V4 mHC forward/backward benchmark.
-
-This intentionally benchmarks only the component boundary requested by
-``deepseek_v4_liger_mhc``. It does not load the model or collect a full training
-profile.
-"""
+#!/usr/bin/env python3
 
 import argparse
 import gc

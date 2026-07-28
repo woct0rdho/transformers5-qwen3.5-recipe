@@ -1,5 +1,3 @@
-"""DeepSeek V4 top-6 route validation and profile summaries."""
-
 from dataclasses import dataclass, field
 from typing import Any
 

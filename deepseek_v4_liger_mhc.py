@@ -1,7 +1,7 @@
 """Fixed-geometry Triton mHC training kernels for DeepSeek V4.
 
 The implementation follows the Liger custom-autograd decomposition while using
-one-program-per-token projection loops inspired by SGLang's fused HC head.  It
+one-program-per-token projection loops inspired by SGLang's fused HC head. It
 is deliberately specialized for the DeepSeek V4 Flash training geometry:
 HC=4, hidden size 4096, BF16 activations, FP32 controls with a native-layout
 F16 projection cache, 20 Sinkhorn iterations, and physical

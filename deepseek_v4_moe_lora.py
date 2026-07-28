@@ -1,5 +1,3 @@
-"""DeepSeek V4 complete-expert GGUF LoRA registration."""
-
 from typing import Any
 
 import torch

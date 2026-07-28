@@ -1,10 +1,3 @@
-"""Fixed-shape sliding attention for DeepSeek V4 training on gfx1151.
-
-The kernel boundary keeps DeepSeek's compact MQA layout and shared K=V input.
-It uses project-local grouped-head forward, query-owned backward, and dedicated
-compact shared-KV gradient kernels.
-"""
-
 import math
 from typing import Any
 

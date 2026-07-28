@@ -11,9 +11,9 @@ The optimized training workloads are sequence length 2,048 at physical batches
 * DeepSeek V4 hash routers have the same hidden/expert geometry and top-6
   weights, but their expert IDs come from the fixed token lookup table.
 
-The linear projection remains a framework GEMM.  The Triton kernel replaces
+The linear projection remains a framework GEMM. The Triton kernel replaces
 full-width softmax/sqrt-softplus plus ``torch.topk`` with one 256-expert streaming
-selection.  Normalization is then evaluated only for the selected 8 or 6
+selection. Normalization is then evaluated only for the selected 8 or 6
 experts, preserving ordinary autograd for router-score gradients.
 """
 
@@ -58,10 +58,10 @@ def _is_supported_router_geometry(
 def _router_topk_launch(num_tokens: int) -> tuple[int, int, int]:
     """Return ``(BLOCK_M, BLOCK_N, num_warps)`` for the fixed token buckets.
 
-    The expert axis always has 256 entries.  A 64-expert streaming tile won for
+    The expert axis always has 256 entries. A 64-expert streaming tile won for
     both statically specialized top-8 identity scoring and top-6
-    sqrt-softplus-plus-bias scoring.  Batch 1 uses four rows/four warps; batches 4
-    and 16 use eight rows/eight warps.  Larger row tiles increased register
+    sqrt-softplus-plus-bias scoring. Batch 1 uses four rows/four warps. Batches 4
+    and 16 use eight rows/eight warps. Larger row tiles increased register
     pressure and regressed both router shapes.
     """
 
@@ -244,7 +244,7 @@ def router_topk_indices(
             raise ValueError("Router correction bias must be on the logits device.")
         correction_bias = correction_bias.contiguous()
     elif apply_sqrt_softplus:
-        # Triton still requires a pointer argument; it is not loaded when the
+        # Triton still requires a pointer argument. It is not loaded when the
         # compile-time HAS_CORRECTION_BIAS flag is false.
         correction_bias = logits
 

@@ -7,9 +7,8 @@ This document owns the dense sliding-attention backward algorithm, launch tables
 ## Production contract
 
 Backward returns:
-
-- BF16 `dQ` `[B,64,2048,512]`;
-- one BF16 combined shared-input gradient `[B,1,2048,512]` for K=V;
+- BF16 `dQ` `[B,64,2048,512]`.
+- one BF16 combined shared-input gradient `[B,1,2048,512]` for K=V.
 - FP32 differentiable sink gradient `[64]`.
 
 It consumes BF16 Q/shared-KV/output/`dO`, FP32 LSE, and one raw FP16 score band `[B,64,2048,128]`. Production `dO` may be a last-dimension-contiguous non-contiguous view. No repeated K/V heads, S-by-S probability tensor, output atomics, per-head KV gradient, or full partial-gradient workspace is permitted.
@@ -19,11 +18,10 @@ The stock AITER gfx1151 D512 backward requests 128 KiB LDS, while the accepted p
 ## Accepted schedule
 
 The backward uses four deterministic launches in this order:
-
-1. Value owner: key-owned split `dV` reads raw scores, reconstructs probabilities from FP32 LSE, and writes the compact shared-KV gradient buffer.
-2. Query owner: grouped `dQ` computes Delta and sink partials, reconstructs probabilities, forms `dS`, accumulates direct `dQ`, and overwrites the now-dead FP16 score band with `dS`.
-3. Key owner: one-dot `dK` reads FP16 `dS`, computes `scale * dS^T @ Q`, and adds it into the existing `dV` buffer.
-4. Sink reducer: a fixed-order FP32 reduction emits `[64]`.
+- Value owner: key-owned split `dV` reads raw scores, reconstructs probabilities from FP32 LSE, and writes the compact shared-KV gradient buffer.
+- Query owner: grouped `dQ` computes Delta and sink partials, reconstructs probabilities, forms `dS`, accumulates direct `dQ`, and overwrites the now-dead FP16 score band with `dS`.
+- Key owner: one-dot `dK` reads FP16 `dS`, computes `scale * dS^T @ Q`, and adds it into the existing `dV` buffer.
+- Sink reducer: a fixed-order FP32 reduction emits `[64]`.
 
 For visible probability `P` and `Delta_i = sum_d(O_i,d * dO_i,d)`:
 
@@ -100,15 +98,14 @@ The score handoff removes the expensive two-dot key owner. The remaining dominan
 
 ## Work and roofline
 
-Useful backward dot work is `66.589` GFLOP per batch element. Tile issuance is `79.054` GFLOP per batch element: grouped query ownership issues `1.125x` useful pairs and key ownership issues `1.250x`. Useful backward throughput is `7.28/7.42/7.33 TFLOP/s`; issued throughput is `8.64/8.81/8.70 TFLOP/s`.
+Useful backward dot work is `66.589` GFLOP per batch element. Tile issuance is `79.054` GFLOP per batch element: grouped query ownership issues `1.125x` useful pairs and key ownership issues `1.250x`. Useful backward throughput is `7.28/7.42/7.33 TFLOP/s`. Issued throughput is `8.64/8.81/8.70 TFLOP/s`.
 
 At the complete boundary, useful throughput is `6.80/6.92/6.68 TFLOP/s` and issued throughput is `7.93/8.08/7.79 TFLOP/s`, only about 13% of the `59.4 TFLOP/s` WMMA peak. Masked issuance is therefore not the primary gap. The limiting factors are:
-
-- 64 KiB LDS and 256 VGPRs in forward and `dQ`, allowing low occupancy;
-- 212-265 spills in those D512 FP32-accumulator kernels;
-- narrow N16/N32 local-window dots rather than large dense GEMMs;
-- online-softmax `exp2`, reductions, masking, and state traffic outside WMMA accounting;
-- serial traversal of 64 query heads in compact key owners;
+- 64 KiB LDS and 256 VGPRs in forward and `dQ`, allowing low occupancy.
+- 212-265 spills in those D512 FP32-accumulator kernels.
+- narrow N16/N32 local-window dots rather than large dense GEMMs.
+- online-softmax `exp2`, reductions, masking, and state traffic outside WMMA accounting.
+- serial traversal of 64 query heads in compact key owners.
 - FP16 score/`dS` traffic, which is necessary to remove two larger QK recomputations.
 
 Larger tiles exceed LDS, smaller accumulators and split dimensions lost absolute time, and lower precision failed either sink accuracy or complete-boundary value. The remaining roofline gap is explained by resource occupancy and mixed scalar/matrix work, not an untested launch parameter.
@@ -116,57 +113,57 @@ Larger tiles exceed LDS, smaller accumulators and split dimensions lost absolute
 ## Optimization history
 
 Accepted progression:
-
-- query-owned `dQ`/Delta/sink and key-owned compact shared-KV gradients;
-- group-4 recomputation `dQ`, then larger groups after QK removal;
-- compact raw FP16 scores removing both backward QK dots;
-- split `dV` and `dK` after probability reconstruction made `dV` lightweight;
-- `dV -> dQ/dS -> dK` ordering and in-place score-to-`dS` handoff;
+- query-owned `dQ`/Delta/sink and key-owned compact shared-KV gradients.
+- group-4 recomputation `dQ`, then larger groups after QK removal.
+- compact raw FP16 scores removing both backward QK dots.
+- split `dV` and `dK` after probability reconstruction made `dV` lightweight.
+- `dV -> dQ/dS -> dK` ordering and in-place score-to-`dS` handoff.
 - one-dot `dK` retuning and complete-boundary producer-consumer finalist selection.
 
 Rejected branches include:
-
-- fixed traversal counts;
-- 8-row key tiles and earlier 8-row query ownership under recomputation;
-- pre-handoff split or serial `dK/dV`;
-- `dK`-first instruction ordering;
-- `matrix_instr_nonkdim={16,32}` overrides;
-- per-head KV atomics, repeated KV heads, and full partial-gradient workspaces;
-- BF16 score state due sink cancellation;
-- FP32 score state due doubled memory and slower complete time;
-- normalized FP16 probabilities due bandwidth cost;
-- output-derived Delta for sink due slower code and worse sink accuracy;
+- fixed traversal counts.
+- 8-row key tiles and earlier 8-row query ownership under recomputation.
+- pre-handoff split or serial `dK/dV`.
+- `dK`-first instruction ordering.
+- `matrix_instr_nonkdim={16,32}` overrides.
+- per-head KV atomics, repeated KV heads, and full partial-gradient workspaces.
+- BF16 score state due sink cancellation.
+- FP32 score state due doubled memory and slower complete time.
+- normalized FP16 probabilities due bandwidth cost.
+- output-derived Delta for sink due slower code and worse sink accuracy.
 - lower-precision LSE/Delta/sink state.
 
 All rejected normalization, alternate saved-state, score-disabled recomputation, fused `dK/dV`, and AITER fallback branches have been removed from production. The runtime contains only the accepted raw-score `dV -> dQ/dS -> dK` schedule. A post-cleanup 50-iteration verification measured `14.778/58.543/240.564 ms` complete at B1/B4/B16, within 1.5% of the accepted complete medians, with unchanged correctness and no geometry changes.
 
 ## Post-HCA review
 
-The later CSA/HCA work does not expose a new sliding-specific owner. Sliding already has 64 local key tiles at B1 with nearly uniform 128-row work, so HCA's bounded compressed head partials do not address under-occupancy. Arithmetic packing would save only the short initial-window triangle, approximately 1 MiB per batch element, while disturbing the accepted 256-byte score-row alignment. CSA's two-phase dS/D256 dQ schedule won by replacing a 971-spill owner over a 512-entry triangular prefix with a 17-spill feature-sliced owner. Sliding has no compressed prefix, only 248-265 spills, and much less dQ traversal, so extra dS/K reads have no comparable repayment. HCA's measured split loss further confirms that a CSA win is not sufficient evidence to reopen lower-pressure families. Sliding remains closed.
+The later CSA/HCA work does not expose a new sliding-specific owner. Sliding already has 64 local key tiles at B1 with nearly uniform 128-row work, so HCA's bounded compressed head partials do not address under-occupancy. Arithmetic packing would save only the short initial-window triangle, approximately 1 MiB per batch element, while disturbing the accepted 256-byte score-row alignment.
 
-The in-place score-to-dS handoff deliberately supports one backward per forward. Production checkpoint replay satisfies this contract; repeated backward through one retained graph is unsupported.
+CSA's two-phase dS/D256 dQ schedule won by replacing a 971-spill owner over a 512-entry triangular prefix with a 17-spill feature-sliced owner. Sliding has no compressed prefix, only 248-265 spills, and much less dQ traversal, so extra dS/K reads have no comparable repayment. HCA's measured split loss further confirms that a CSA win is not sufficient evidence to reopen lower-pressure families. Sliding remains closed.
+
+The in-place score-to-dS handoff deliberately supports one backward per forward. Production checkpoint replay satisfies this contract. Repeated backward through one retained graph is unsupported.
 
 ## External review and exhaustion
 
-AITER's backward uses the same Delta/dS identities and independently retains a `delta_recomp` sink path; it offers no compact reusable `dS` handoff and its stock D512 launch exceeds local LDS. llama.cpp, DS4, vLLM, and SGLang remain forward/cache implementations without compatible Q/KV/sink training backward. Triton's available gfx1151 warp, wave, stage, and MFMA controls were screened; no additional control removes the measured accumulator pressure.
+AITER's backward uses the same Delta/dS identities and independently retains a `delta_recomp` sink path. It offers no compact reusable `dS` handoff and its stock D512 launch exceeds local LDS. llama.cpp, DS4, vLLM, and SGLang remain forward/cache implementations without compatible Q/KV/sink training backward. Triton's available gfx1151 warp, wave, stage, and MFMA controls were screened. No additional control removes the measured accumulator pressure.
 
 The final review found no viable unmeasured algorithm that preserves direct compact gradients, deterministic FP32 sinks, FP32 LSE/Delta, no atomics, no dense probabilities, and no additional large workspace. Backward tuning is closed.
 
 ## Validation and evidence
 
-The focused suite passes `10 passed`. `py_compile`, Ruff, and `git diff --check` pass. The earlier physical-B1/S2048 real-model audit remains valid for integration and packed-payload immutability; a final focused checkpoint replay was rerun after the kernel changes.
+The focused suite passes `10 passed`. `py_compile`, Ruff, and `git diff --check` pass. The earlier physical-B1/S2048 real-model audit remains valid for integration and packed-payload immutability. A final focused checkpoint replay was rerun after the kernel changes.
 
 Primary artifacts:
 
 ```text
-/tmp/deepseek_v4_sliding_raw_score_handoff_production_final.json
-/tmp/deepseek_v4_sliding_raw_score_handoff_metadata.json
-/tmp/deepseek_v4_sliding_specialized_profile.json
-/tmp/deepseek_v4_sliding_raw_score_complete_finalists.json
-/tmp/deepseek_v4_sliding_grad_score_complete_finalists.json
-/tmp/deepseek_v4_sliding_grad_score_dk_tuning.json
-/tmp/deepseek_v4_sliding_raw_score_dq_tuning.json
-/tmp/deepseek_v4_sliding_raw_score_dv_tuning.json
-/tmp/deepseek_v4_sliding_grad_score_state_comparison.json
-/tmp/deepseek_v4_sliding_sink_delta_identity.json
+~/tmp/test_no_unsloth/deepseek_v4_sliding_raw_score_handoff_production_final.json
+~/tmp/test_no_unsloth/deepseek_v4_sliding_raw_score_handoff_metadata.json
+~/tmp/test_no_unsloth/deepseek_v4_sliding_specialized_profile.json
+~/tmp/test_no_unsloth/deepseek_v4_sliding_raw_score_complete_finalists.json
+~/tmp/test_no_unsloth/deepseek_v4_sliding_grad_score_complete_finalists.json
+~/tmp/test_no_unsloth/deepseek_v4_sliding_grad_score_dk_tuning.json
+~/tmp/test_no_unsloth/deepseek_v4_sliding_raw_score_dq_tuning.json
+~/tmp/test_no_unsloth/deepseek_v4_sliding_raw_score_dv_tuning.json
+~/tmp/test_no_unsloth/deepseek_v4_sliding_grad_score_state_comparison.json
+~/tmp/test_no_unsloth/deepseek_v4_sliding_sink_delta_identity.json
 ```
