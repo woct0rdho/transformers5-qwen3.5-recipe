@@ -6,9 +6,10 @@ os.environ["TORCH_LOGS"] = "recompiles"
 os.environ["TRITON_PRINT_AUTOTUNING"] = "1"
 
 from pathlib import Path
+from typing import Any, cast
 
 import torch
-from datasets import load_from_disk
+from datasets import Dataset, load_from_disk
 from peft import LoraConfig, TaskType, get_peft_model
 from transformers import (
     AutoModelForCausalLM,
@@ -60,7 +61,7 @@ def main():
 
     set_seed(random_seed)
 
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_id)
+    tokenizer = cast(Any, AutoTokenizer.from_pretrained(tokenizer_id))
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
 
@@ -103,6 +104,8 @@ def main():
 
     # Dataset is shuffled by the trainer by default
     dataset = load_from_disk(dataset_dir)
+    if not isinstance(dataset, Dataset):
+        raise TypeError(f"expected a Dataset at {dataset_dir}, got DatasetDict")
 
     training_args = TrainingArguments(
         output_dir=str(output_dir),

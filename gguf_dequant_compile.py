@@ -1,3 +1,5 @@
+from typing import Any, cast
+
 import torch
 from transformers.integrations import gguf_dequant_kernels
 
@@ -13,13 +15,14 @@ def configure_compiled_gguf_dequantize() -> bool:
     permit enough Dynamo variants for the complete model and retain full-graph
     failures instead of silently falling back to eager execution.
     """
-    torch._dynamo.config.recompile_limit = _RECOMPILE_LIMIT
+    torch._dynamo.config.__dict__["recompile_limit"] = _RECOMPILE_LIMIT
 
     if getattr(gguf_dequant_kernels, _PATCH_MARKER, False):
         return False
 
     eager_dequantize = gguf_dequant_kernels.dequantize
-    compiled_dequantize = torch.compile(
+    compile_fn = cast(Any, torch.compile)
+    compiled_dequantize = compile_fn(
         eager_dequantize,
         fullgraph=True,
         mode="max-autotune-no-cudagraphs",
@@ -27,5 +30,5 @@ def configure_compiled_gguf_dequantize() -> bool:
     )
     compiled_dequantize._no_unsloth_eager_dequantize = eager_dequantize
     gguf_dequant_kernels.dequantize = compiled_dequantize
-    setattr(gguf_dequant_kernels, _PATCH_MARKER, True)
+    gguf_dequant_kernels.__dict__[_PATCH_MARKER] = True
     return True

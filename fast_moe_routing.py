@@ -262,7 +262,7 @@ class _RouteGather(torch.autograd.Function):
         return selected_hidden_states
 
     @staticmethod
-    def backward(ctx, grad_selected: torch.Tensor):
+    def backward(ctx, grad_selected: torch.Tensor):  # ty: ignore[invalid-method-override]
         if not ctx.needs_input_grad[0]:
             return None, None, None
 
@@ -321,7 +321,7 @@ class _RouteCombine(torch.autograd.Function):
         return result
 
     @staticmethod
-    def backward(ctx, grad_final: torch.Tensor):
+    def backward(ctx, grad_final: torch.Tensor):  # ty: ignore[invalid-method-override]
         expert_output, routing_weights, permutation = ctx.saved_tensors
         _, num_top_k, hidden_dim = ctx.routing_geometry
         num_routes = expert_output.shape[0]

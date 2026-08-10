@@ -14,7 +14,7 @@ class BF16AdapterTrainer(Trainer):
             kwargs["autocast_adapter_dtype"] = False
             return load_adapter(*args, **kwargs)
 
-        checkpoint_model.load_adapter = load_adapter_without_upcast
+        checkpoint_model.__dict__["load_adapter"] = load_adapter_without_upcast
         return super()._load_from_checkpoint(
             resume_from_checkpoint, model=checkpoint_model
         )

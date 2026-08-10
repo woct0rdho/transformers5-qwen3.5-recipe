@@ -16,7 +16,7 @@ parameter wrappers and transient state on the expert module.
 
 import math
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import torch
 from aiter.ops.triton.gmm import gmm, ptgmm
@@ -36,6 +36,7 @@ from moe_gmm_configs import ptgmm_config as _ptgmm_config
 
 EXPERTS_IMPLEMENTATION = "qwen3_5_moe_gguf_mmq_aiter_lora"
 _LORA_WEIGHTS_KWARG = "_qwen3_5_moe_gguf_lora_weights"
+_GGUF_EXPERTS_TYPE = cast(type[Any], GGUFExperts)
 
 
 def _aiter_forward(
@@ -123,7 +124,7 @@ class _AiterGroupedMM(torch.autograd.Function):
         return _aiter_forward(lhs, rhs, group_sizes)
 
     @staticmethod
-    def backward(ctx, grad_output: torch.Tensor):
+    def backward(ctx, grad_output: torch.Tensor):  # ty: ignore[invalid-method-override]
         lhs, rhs, group_sizes = ctx.saved_tensors
         if grad_output.stride() != (grad_output.shape[1], 1):
             raise ValueError("AITER grouped MM output gradient must be row-major.")
@@ -151,7 +152,7 @@ def aiter_grouped_mm(
 
 
 def _dequantize_selected_experts(
-    weight: torch.Tensor,
+    weight: Any,
     expert_indices: torch.Tensor,
     dtype: torch.dtype,
     device: torch.device,
@@ -178,7 +179,7 @@ class _AiterGGUFExpertProjection(torch.autograd.Function):
     def forward(
         ctx,
         hidden_states: torch.Tensor,
-        weight: torch.Tensor,
+        weight: Any,
         expert_indices: torch.Tensor,
         expert_offsets: torch.Tensor,
         group_sizes: torch.Tensor,
@@ -246,7 +247,7 @@ class _AiterGGUFExpertProjection(torch.autograd.Function):
         return _aiter_forward(hidden_states, dense_weight.transpose(1, 2), group_sizes)
 
     @staticmethod
-    def backward(ctx, grad_output: torch.Tensor):
+    def backward(ctx, grad_output: torch.Tensor):  # ty: ignore[invalid-method-override]
         grad_hidden = None
         if ctx.needs_input_grad[0]:
             payload, expert_indices, grouped_metadata = ctx.saved_tensors
@@ -287,8 +288,8 @@ class _AiterGGUFExpertPairProjection(torch.autograd.Function):
     def forward(
         ctx,
         hidden_states: torch.Tensor,
-        first_weight: GGUFQuantizedTensor,
-        second_weight: GGUFQuantizedTensor,
+        first_weight: Any,
+        second_weight: Any,
         expert_indices: torch.Tensor,
         expert_offsets: torch.Tensor,
         group_sizes: torch.Tensor,
@@ -346,7 +347,7 @@ class _AiterGGUFExpertPairProjection(torch.autograd.Function):
         )
 
     @staticmethod
-    def backward(
+    def backward(  # ty: ignore[invalid-method-override]
         ctx,
         first_grad_output: torch.Tensor | None,
         second_grad_output: torch.Tensor | None,
@@ -485,11 +486,12 @@ class FastGGUFMoeLora(torch.nn.Module, LoraLayer):
 
     def _get_in_out_features(self, module: torch.nn.Module) -> tuple[int, int]:
         module = module.get_base_layer() if isinstance(module, LoraLayer) else module
-        if not isinstance(module, GGUFExperts):
+        if not isinstance(module, _GGUF_EXPERTS_TYPE):
             raise TypeError(
                 f"Fast GGUF MoE LoRA requires GGUFExperts, got {type(module).__name__}."
             )
-        return module.hidden_dim, 2 * module.intermediate_dim
+        module = cast(Any, module)
+        return int(module.hidden_dim), 2 * int(module.intermediate_dim)
 
     def __init__(
         self,
@@ -531,16 +533,16 @@ class FastGGUFMoeLora(torch.nn.Module, LoraLayer):
                 "Fast GGUF MoE LoRA does not support DoRA or aLoRA variants."
             )
 
-        experts = self.get_base_layer()
-        if not isinstance(experts, GGUFExperts):
+        experts = cast(Any, self.get_base_layer())
+        if not isinstance(experts, _GGUF_EXPERTS_TYPE):
             raise TypeError(
                 f"Fast GGUF MoE LoRA requires GGUFExperts, got {type(experts).__name__}."
             )
-        device = experts.gate_proj.device
-        dtype = experts.compute_dtype
-        e = experts.num_experts
-        h = experts.hidden_dim
-        i = experts.intermediate_dim
+        device = cast(torch.device, experts.gate_proj.device)
+        dtype = cast(torch.dtype, experts.compute_dtype)
+        e = int(experts.num_experts)
+        h = int(experts.hidden_dim)
+        i = int(experts.intermediate_dim)
 
         self.r[adapter_name] = r
         self.lora_alpha[adapter_name] = lora_alpha
@@ -562,21 +564,21 @@ class FastGGUFMoeLora(torch.nn.Module, LoraLayer):
             (e, h, r), device=device, dtype=dtype
         )
 
+        lora_a = cast(Any, self.lora_A[adapter_name])
+        lora_b = cast(Any, self.lora_B[adapter_name])
+        lora_a_down = cast(Any, self.lora_A_down[adapter_name])
+        lora_b_down = cast(Any, self.lora_B_down[adapter_name])
         init = config.init_lora_weights
         if init is True:
-            torch.nn.init.kaiming_uniform_(
-                self.lora_A[adapter_name].weight, a=math.sqrt(5)
-            )
-            torch.nn.init.kaiming_uniform_(
-                self.lora_A_down[adapter_name].weight, a=math.sqrt(5)
-            )
-            torch.nn.init.zeros_(self.lora_B[adapter_name].weight)
-            torch.nn.init.zeros_(self.lora_B_down[adapter_name].weight)
+            torch.nn.init.kaiming_uniform_(lora_a.weight, a=math.sqrt(5))
+            torch.nn.init.kaiming_uniform_(lora_a_down.weight, a=math.sqrt(5))
+            torch.nn.init.zeros_(lora_b.weight)
+            torch.nn.init.zeros_(lora_b_down.weight)
         elif init == "gaussian":
-            torch.nn.init.normal_(self.lora_A[adapter_name].weight, std=1 / r)
-            torch.nn.init.normal_(self.lora_A_down[adapter_name].weight, std=1 / r)
-            torch.nn.init.zeros_(self.lora_B[adapter_name].weight)
-            torch.nn.init.zeros_(self.lora_B_down[adapter_name].weight)
+            torch.nn.init.normal_(lora_a.weight, std=1 / r)
+            torch.nn.init.normal_(lora_a_down.weight, std=1 / r)
+            torch.nn.init.zeros_(lora_b.weight)
+            torch.nn.init.zeros_(lora_b_down.weight)
         elif init is not False:
             raise ValueError(
                 f"Fast GGUF MoE LoRA does not support init_lora_weights={init!r}."
@@ -617,11 +619,15 @@ class FastGGUFMoeLora(torch.nn.Module, LoraLayer):
         adapter_name = self.active_adapters[0]
         if adapter_name not in self.lora_A:
             return None
+        lora_a = cast(Any, self.lora_A[adapter_name])
+        lora_b = cast(Any, self.lora_B[adapter_name])
+        lora_a_down = cast(Any, self.lora_A_down[adapter_name])
+        lora_b_down = cast(Any, self.lora_B_down[adapter_name])
         return _ExpertLoraWeights(
-            gate_up_a=self.lora_A[adapter_name].weight,
-            gate_up_b=self.lora_B[adapter_name].weight,
-            down_a=self.lora_A_down[adapter_name].weight,
-            down_b=self.lora_B_down[adapter_name].weight,
+            gate_up_a=lora_a.weight,
+            gate_up_b=lora_b.weight,
+            down_a=lora_a_down.weight,
+            down_b=lora_b_down.weight,
             scaling=float(self.scaling[adapter_name]),
         )
 
@@ -630,7 +636,7 @@ class FastGGUFMoeLora(torch.nn.Module, LoraLayer):
     ) -> torch.Tensor:
         adapter_names = kwargs.pop("adapter_names", None)
         lora_weights = self._active_lora_weights(adapter_names)
-        experts = self.get_base_layer()
+        experts = cast(Any, self.get_base_layer())
         if experts.config._experts_implementation != EXPERTS_IMPLEMENTATION:
             raise RuntimeError(
                 f"Fast GGUF MoE LoRA requires experts_implementation={EXPERTS_IMPLEMENTATION!r}, "
@@ -677,7 +683,7 @@ def _lora_grouped_linear(
 
 
 def qwen3_5_moe_gguf_mmq_aiter_lora_forward(
-    self: GGUFExperts,
+    self: Any,
     hidden_states: torch.Tensor,
     top_k_index: torch.Tensor,
     top_k_weights: torch.Tensor,
@@ -685,7 +691,7 @@ def qwen3_5_moe_gguf_mmq_aiter_lora_forward(
 ) -> torch.Tensor:
     """Persistent packed GGUF base projections with separated AITER LoRA GEMMs."""
 
-    if not isinstance(self, GGUFExperts):
+    if not isinstance(self, _GGUF_EXPERTS_TYPE):
         raise TypeError(
             f"{EXPERTS_IMPLEMENTATION} requires GGUFExperts, got {type(self).__name__}."
         )
@@ -780,17 +786,17 @@ def register_fast_moe_lora(
             "Persistent GGUF expert LoRA targets the complete 'experts' module, not target_parameters."
         )
     if isinstance(lora_config.target_modules, str):
-        raise ValueError(
+        raise TypeError(
             "Fast GGUF MoE LoRA requires an explicit target_modules collection, not a regex string."
         )
 
     target_modules = set(lora_config.target_modules or ())
     target_modules.add("experts")
-    lora_config.target_modules = target_modules
+    lora_config.__dict__["target_modules"] = target_modules
 
     ALL_GGUF_EXPERTS_FUNCTIONS[EXPERTS_IMPLEMENTATION] = (
         qwen3_5_moe_gguf_mmq_aiter_lora_forward
     )
-    model.set_experts_implementation(EXPERTS_IMPLEMENTATION)
+    cast(Any, model).set_experts_implementation(EXPERTS_IMPLEMENTATION)
     register({GGUFExperts: FastGGUFMoeLora})
     return lora_config

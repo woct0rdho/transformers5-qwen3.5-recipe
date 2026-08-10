@@ -133,13 +133,14 @@ def configure_deepseek_v4_grouped_mmq(model: torch.nn.Module) -> dict[str, Any]:
     logical grouped fallback when the checkpoint contract does not match.
     """
 
-    base = model.get_base_model() if hasattr(model, "get_base_model") else model
+    get_base_model = getattr(model, "get_base_model", None)
+    base = get_base_model() if callable(get_base_model) else model
     paths: list[str] = []
     for name, module in base.named_modules():
         if not isinstance(module, GGUFGroupedLinear):
             continue
         if not isinstance(module.weight, GGUFQuantizedTensor):
-            raise RuntimeError(
+            raise TypeError(
                 f"DeepSeek grouped projection {name!r} is not GGUF-quantized."
             )
         supported = (

@@ -25,6 +25,6 @@ def force_transformers_safetensors_pread():
         kwargs["backend"] = "pread"
         return original_safe_open(*args, **kwargs)
 
-    modeling_utils.safe_open = safe_open_with_pread
+    modeling_utils.__dict__["safe_open"] = safe_open_with_pread
     yield
-    modeling_utils.safe_open = original_safe_open
+    modeling_utils.__dict__["safe_open"] = original_safe_open

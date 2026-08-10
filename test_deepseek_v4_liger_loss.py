@@ -12,6 +12,12 @@ from deepseek_v4_liger_loss import (
 )
 
 
+def _require_grad(tensor: torch.Tensor) -> torch.Tensor:
+    if tensor.grad is None:
+        raise AssertionError("expected a tensor gradient")
+    return tensor.grad
+
+
 def _q8_lm_head(weight: np.ndarray) -> GGUFLinear:
     packed = torch.from_numpy(
         gguf.quantize(weight.astype(np.float32), gguf.GGMLQuantizationType.Q8_0).copy()
@@ -62,7 +68,7 @@ def test_scoped_q8_0_liger_loss_matches_logical_reference() -> None:
         materializations += 1
         return original_materialize(**kwargs)
 
-    head.materialize_logical_weight = counted_materialize
+    head.__dict__["materialize_logical_weight"] = counted_materialize
     scoped = deepseek_v4_liger_causal_lm_loss(
         hidden_scoped,
         head,
@@ -73,12 +79,12 @@ def test_scoped_q8_0_liger_loss_matches_logical_reference() -> None:
 
     torch.testing.assert_close(scoped, reference, rtol=0, atol=0)
     torch.testing.assert_close(
-        hidden_scoped.grad, hidden_reference.grad, rtol=0, atol=0
+        _require_grad(hidden_scoped), _require_grad(hidden_reference), rtol=0, atol=0
     )
     assert materializations == 1
     assert head.weight.grad is None
     assert torch.isfinite(scoped)
-    assert torch.isfinite(hidden_scoped.grad).all()
+    assert torch.isfinite(_require_grad(hidden_scoped)).all()
 
 
 def test_packed_q8_0_liger_loss_uses_native_mmq_without_materializing_head() -> None:
@@ -108,7 +114,7 @@ def test_packed_q8_0_liger_loss_uses_native_mmq_without_materializing_head() -> 
         materializations += 1
         return original_materialize(**kwargs)
 
-    head.materialize_logical_weight = counted_materialize
+    head.__dict__["materialize_logical_weight"] = counted_materialize
     operations: list[str] = []
 
     class _RecordOps(TorchDispatchMode):
@@ -129,4 +135,4 @@ def test_packed_q8_0_liger_loss_uses_native_mmq_without_materializing_head() -> 
     assert materializations == 0
     assert "torch_ggml_ops.mmq.default" in operations
     assert "torch_ggml_ops.mmq_grad_input.default" in operations
-    assert torch.isfinite(hidden_packed.grad).all()
+    assert torch.isfinite(_require_grad(hidden_packed)).all()

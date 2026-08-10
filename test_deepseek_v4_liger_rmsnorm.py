@@ -1,3 +1,5 @@
+from typing import Any, cast
+
 import pytest
 import torch
 from peft import LoraConfig, get_peft_model
@@ -10,6 +12,12 @@ from deepseek_v4_liger_rmsnorm import (
     _LigerFrozenWeightRMSNormFunction,
     configure_deepseek_v4_liger_rmsnorm,
 )
+
+
+def _require_grad(tensor: torch.Tensor) -> torch.Tensor:
+    if tensor.grad is None:
+        raise AssertionError("expected a tensor gradient")
+    return tensor.grad
 
 
 class _NormToy(torch.nn.Module):
@@ -82,8 +90,8 @@ def test_fast_frozen_weight_rmsnorm_matches_strict_with_bf16_tolerance(
         maximum_relative_rmse=1e-4,
     )
     _assert_close_mixed_precision(
-        candidate_x.grad,
-        reference_x.grad,
+        _require_grad(candidate_x),
+        _require_grad(reference_x),
         minimum_cosine=0.999999,
         maximum_relative_rmse=1e-4,
     )
@@ -97,7 +105,7 @@ def test_width_128_weighted_norm_uses_tuned_launch_geometry() -> None:
     assert report["weighted"] == 1
     assert report["skipped_weighted_128"] == 0
     assert not candidate.norm.weight.requires_grad
-    assert getattr(candidate.norm, "_deepseek_v4_liger_rmsnorm")
+    assert candidate.norm._deepseek_v4_liger_rmsnorm
 
 
 def test_in_place_backward_is_stable_on_branched_norm_output() -> None:
@@ -131,8 +139,8 @@ def test_in_place_backward_is_stable_on_branched_norm_output() -> None:
         maximum_relative_rmse=1e-4,
     )
     _assert_close_mixed_precision(
-        candidate_x.grad,
-        reference_x.grad,
+        _require_grad(candidate_x),
+        _require_grad(reference_x),
         minimum_cosine=0.999999,
         maximum_relative_rmse=1e-4,
     )
@@ -159,8 +167,8 @@ def test_q_b_scale_free_liger_norm_matches_strict_gradient() -> None:
         maximum_relative_rmse=0.005,
     )
     _assert_close_mixed_precision(
-        candidate_x.grad,
-        reference_x.grad,
+        _require_grad(candidate_x),
+        _require_grad(reference_x),
         minimum_cosine=0.99999,
         maximum_relative_rmse=0.005,
     )
@@ -168,9 +176,10 @@ def test_q_b_scale_free_liger_norm_matches_strict_gradient() -> None:
 
 def test_mhc_unweighted_norm_remains_authoritative() -> None:
     _, candidate = _frozen_pair(512)
-    mhc_forward = candidate.attn_hc.input_norm.forward
+    input_norm = cast(Any, candidate.attn_hc.input_norm)
+    mhc_forward = input_norm.forward
     configure_deepseek_v4_liger_rmsnorm(candidate)
-    assert candidate.attn_hc.input_norm.forward.__func__ is mhc_forward.__func__
+    assert input_norm.forward.__func__ is mhc_forward.__func__
 
 
 def test_frozen_weight_function_returns_no_weight_gradient() -> None:
@@ -201,14 +210,14 @@ def test_base_model_patch_survives_lora_injection() -> None:
     assert report["patched"] == 2
     model = get_peft_model(
         base,
-        LoraConfig(target_modules={"q_a_proj"}, r=4, lora_alpha=4),
+        LoraConfig(target_modules=["q_a_proj"], r=4, lora_alpha=4),
         autocast_adapter_dtype=False,
     )
     x = torch.randn(7, 512, device="cuda", dtype=torch.bfloat16, requires_grad=True)
     model(x).float().square().mean().backward()
 
     patched_base = model.base_model.model
-    assert getattr(patched_base.norm, "_deepseek_v4_liger_rmsnorm")
+    assert patched_base.norm._deepseek_v4_liger_rmsnorm
     assert patched_base.norm.weight.grad is None
     assert patched_base.q_a_proj.lora_B["default"].weight.grad is not None
 

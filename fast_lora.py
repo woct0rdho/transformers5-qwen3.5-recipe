@@ -11,7 +11,7 @@ cannot merge adapter deltas into their packed physical weights. MoE adapters
 are handled separately by ``fast_moe_lora.py``.
 """
 
-from typing import Any
+from typing import Any, cast
 
 import torch
 from peft import LoraConfig
@@ -28,7 +28,7 @@ _NATIVE_MMQ_QUANT_TYPES = frozenset({8, 10, 11, 12, 13, 14, 16, 22})
 
 
 def supports_native_mmq(weight: GGUFQuantizedTensor) -> bool:
-    return int(weight.quant_type) in _NATIVE_MMQ_QUANT_TYPES
+    return int(cast(Any, weight.quant_type)) in _NATIVE_MMQ_QUANT_TYPES
 
 
 def _fused_lora_add(
@@ -71,11 +71,11 @@ class _FastLoraForwardMixin:
     _cast_input_only_without_autocast = False
 
     def _base_layer_forward(
-        self, x: torch.Tensor, *args: Any, **kwargs: Any
+        self: Any, x: torch.Tensor, *args: Any, **kwargs: Any
     ) -> torch.Tensor:
         return self.base_layer(x, *args, **kwargs)
 
-    def forward(self, x: torch.Tensor, *args: Any, **kwargs: Any) -> torch.Tensor:
+    def forward(self: Any, x: torch.Tensor, *args: Any, **kwargs: Any) -> torch.Tensor:
         # Keep all less-common PEFT behavior on the stock implementation:
         # disabled/merged adapters, mixed-adapter batches, multiple adapters,
         # DoRA/aLoRA/other variants, and modules not targeted by the adapter.

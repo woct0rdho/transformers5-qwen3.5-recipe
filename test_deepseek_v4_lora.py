@@ -17,6 +17,12 @@ from deepseek_v4_lora import (
 )
 
 
+def _require_grad(tensor: torch.Tensor) -> torch.Tensor:
+    if tensor.grad is None:
+        raise AssertionError("expected a tensor gradient")
+    return tensor.grad
+
+
 class _RecordOps(TorchDispatchMode):
     def __init__(self) -> None:
         super().__init__()
@@ -120,7 +126,7 @@ def test_fixed_grouped_q8_0_mmq_matches_dense_packed_reference() -> None:
     grad_output = torch.randn(2, 8, 1024, device="cuda", dtype=torch.bfloat16)
     actual = grouped(hidden)
     actual.backward(grad_output)
-    actual_grad = hidden.grad.detach().clone()
+    actual_grad = _require_grad(hidden).detach().clone()
 
     hidden_reference = hidden.detach().clone().requires_grad_(True)
     packed_groups = packed.reshape(8, 1024, -1)
@@ -141,7 +147,9 @@ def test_fixed_grouped_q8_0_mmq_matches_dense_packed_reference() -> None:
     # Both paths use the same packed Q8_0 dense MMQ arithmetic. Exact equality
     # is a stronger check than an independent dequantized BF16 tolerance here.
     torch.testing.assert_close(actual, reference, rtol=0, atol=0)
-    torch.testing.assert_close(actual_grad, hidden_reference.grad, rtol=0, atol=0)
+    torch.testing.assert_close(
+        actual_grad, _require_grad(hidden_reference), rtol=0, atol=0
+    )
 
 
 def test_grouped_output_lora_is_explicitly_rejected() -> None:

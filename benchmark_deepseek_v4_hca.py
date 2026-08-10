@@ -221,7 +221,12 @@ def run_correctness(batch: int, seed: int) -> dict[str, object]:
     reference_inputs = tuple(
         tensor.detach().clone().requires_grad_() for tensor in candidate_inputs
     )
-    reference_output = reference_hca_attention(*reference_inputs)
+    reference_output = reference_hca_attention(
+        reference_inputs[0],
+        reference_inputs[1],
+        reference_inputs[2],
+        reference_inputs[3],
+    )
     reference_gradients = torch.autograd.grad(
         reference_output, reference_inputs, output_gradient
     )
@@ -242,7 +247,8 @@ def run_correctness(batch: int, seed: int) -> dict[str, object]:
         for name in ("compressor_kv", "compressor_gate")
     )
     candidate_compressed = deepseek_v4_hca_compress(
-        *candidate_producer_inputs,
+        candidate_producer_inputs[0],
+        candidate_producer_inputs[1],
         values["position_bias"],
         values["weight"],
         values["cos"],
@@ -256,7 +262,8 @@ def run_correctness(batch: int, seed: int) -> dict[str, object]:
         tensor.detach().clone().requires_grad_() for tensor in candidate_producer_inputs
     )
     reference_compressed = reference_hca_compress(
-        *reference_producer_inputs,
+        reference_producer_inputs[0],
+        reference_producer_inputs[1],
         values["position_bias"],
         values["weight"],
         values["cos"],

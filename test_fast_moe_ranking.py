@@ -1,5 +1,6 @@
 from copy import deepcopy
 from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 import torch
@@ -50,6 +51,12 @@ def _sort_routes(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     sorted_indices, order = torch.sort(indices, dim=-1)
     return weights.gather(1, order), sorted_indices
+
+
+def _require_grad(tensor: torch.Tensor) -> torch.Tensor:
+    if tensor.grad is None:
+        raise AssertionError("expected a tensor gradient")
+    return tensor.grad
 
 
 @pytest.mark.parametrize(
@@ -123,14 +130,20 @@ def test_qwen_router_matches_reference_forward_and_gradient() -> None:
     loss_reference.backward()
     loss_optimized.backward()
     torch.testing.assert_close(
-        hidden_optimized.grad, hidden_reference.grad, rtol=2e-3, atol=2e-3
+        _require_grad(hidden_optimized),
+        _require_grad(hidden_reference),
+        rtol=2e-3,
+        atol=2e-3,
     )
 
 
 def test_deepseek_router_matches_reference_forward_and_gradient() -> None:
     torch.manual_seed(5678)
-    reference = DeepseekV4TopKRouter(_deepseek_config()).to(
-        device="cuda", dtype=torch.bfloat16
+    reference = cast(
+        Any,
+        DeepseekV4TopKRouter(cast(Any, _deepseek_config())).to(
+            device="cuda", dtype=torch.bfloat16
+        ),
     )
     reference.weight.data.normal_(std=0.02)
     reference.e_score_correction_bias.data.normal_(std=0.01)
@@ -160,7 +173,10 @@ def test_deepseek_router_matches_reference_forward_and_gradient() -> None:
     loss_reference.backward()
     loss_optimized.backward()
     torch.testing.assert_close(
-        hidden_optimized.grad, hidden_reference.grad, rtol=1e-5, atol=1e-5
+        _require_grad(hidden_optimized),
+        _require_grad(hidden_reference),
+        rtol=1e-5,
+        atol=1e-5,
     )
 
 
@@ -187,8 +203,11 @@ def test_router_ties_accept_any_expert_at_the_kth_threshold() -> None:
 
 def test_deepseek_hash_router_avoids_full_width_score_materialization() -> None:
     torch.manual_seed(9012)
-    reference = DeepseekV4HashRouter(_deepseek_config()).to(
-        device="cuda", dtype=torch.bfloat16
+    reference = cast(
+        Any,
+        DeepseekV4HashRouter(cast(Any, _deepseek_config())).to(
+            device="cuda", dtype=torch.bfloat16
+        ),
     )
     reference.weight.data.normal_(std=0.02)
     reference.tid2eid.copy_(

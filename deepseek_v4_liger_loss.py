@@ -8,10 +8,9 @@ vocabulary matrix or full-sequence logits tensor is created during training.
 """
 
 from types import MethodType
-from typing import Any
+from typing import Any, cast
 
 import torch
-import torch.nn as nn
 import torch_ggml_ops  # noqa: F401 Register the native packed operators.
 import triton
 from liger_kernel.ops.cross_entropy import liger_cross_entropy_kernel
@@ -21,6 +20,7 @@ from liger_kernel.ops.fused_linear_cross_entropy import (
 )
 from liger_kernel.ops.utils import amp_custom_bwd, amp_custom_fwd, is_hip
 from liger_kernel.transformers.model.loss_utils import LigerForCausalLMLoss
+from torch import nn
 from transformers.integrations.gguf import GGUFLinear
 from transformers.integrations.gguf_dequant import GGUFQuantizedTensor
 from transformers.modeling_outputs import MoeCausalLMOutputWithPast
@@ -265,7 +265,8 @@ def _packed_q8_liger_for_causal_lm_loss(
         raise RuntimeError(
             "Packed DeepSeek Q8_0 LM-head loss hidden size does not match the LM head."
         )
-    if int(lm_head.weight.quant_type) != 8:
+    quant_type = int(cast(Any, lm_head.weight.quant_type))
+    if quant_type != 8:
         raise RuntimeError(
             "Packed DeepSeek LM-head loss is validated only for Q8_0 weights."
         )
@@ -284,7 +285,7 @@ def _packed_q8_liger_for_causal_lm_loss(
         hidden_states,
         payload,
         shift_labels,
-        int(lm_head.weight.quant_type),
+        quant_type,
         lm_head.out_features,
         _PACKED_LM_HEAD_CHUNK_SIZE,
         ignore_index,
@@ -358,7 +359,7 @@ def _deepseek_v4_liger_forward(
     else:
         loss = deepseek_v4_packed_liger_causal_lm_loss(
             hidden_states,
-            self.lm_head,
+            cast(GGUFLinear, self.lm_head),
             labels,
             hidden_size=self.config.hidden_size,
             loss_kwargs=kwargs,
@@ -366,18 +367,23 @@ def _deepseek_v4_liger_forward(
 
     aux_loss = None
     if output_router_logits:
-        aux_loss = load_balancing_loss_func(
-            outputs.router_logits,
-            self.num_experts,
-            self.num_experts_per_tok,
-            attention_mask,
+        aux_loss = cast(
+            torch.Tensor,
+            load_balancing_loss_func(
+                outputs.router_logits,
+                self.num_experts,
+                self.num_experts_per_tok,
+                attention_mask,
+            ),
         )
         if labels is not None:
+            if loss is None:
+                raise RuntimeError("router auxiliary loss requires a primary loss")
             loss = loss + self.router_aux_loss_coef * aux_loss.to(loss.device)
 
     return MoeCausalLMOutputWithPast(
-        loss=loss,
-        aux_loss=aux_loss,
+        loss=cast(Any, loss),
+        aux_loss=cast(Any, aux_loss),
         logits=logits,
         past_key_values=outputs.past_key_values,
         hidden_states=outputs.hidden_states,
@@ -391,7 +397,8 @@ def apply_deepseek_v4_liger_loss(
 ) -> DeepseekV4ForCausalLM:
     """Patch one model instance with the packed Q8_0 scoped loss."""
 
-    base = model.get_base_model() if hasattr(model, "get_base_model") else model
+    get_base_model = getattr(model, "get_base_model", None)
+    base = get_base_model() if callable(get_base_model) else model
     if not isinstance(base, DeepseekV4ForCausalLM):
         raise TypeError(
             "DeepSeek V4 Liger loss requires DeepseekV4ForCausalLM, got "
@@ -405,5 +412,5 @@ def apply_deepseek_v4_liger_loss(
     if getattr(base, "_deepseek_v4_liger_loss_enabled", False):
         return base
     base.forward = MethodType(_deepseek_v4_liger_forward, base)
-    base._deepseek_v4_liger_loss_enabled = True
+    base.__dict__["_deepseek_v4_liger_loss_enabled"] = True
     return base

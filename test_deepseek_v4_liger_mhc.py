@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 import torch
@@ -25,6 +26,12 @@ _HIDDEN = 4096
 _FLAT = _HC * _HIDDEN
 _MIX = 24
 _EPS = 1e-6
+
+
+def _require_grad(tensor: torch.Tensor) -> torch.Tensor:
+    if tensor.grad is None:
+        raise AssertionError("expected a tensor gradient")
+    return tensor.grad
 
 
 def _controls(seed: int = 2026):
@@ -169,19 +176,19 @@ def test_fused_mhc_matches_transformers_forward_and_activation_gradients() -> No
         maximum_relative_rmse=1e-4,
     )
     _assert_mixed_close(
-        candidate_x.grad,
-        reference_x.grad,
+        _require_grad(candidate_x),
+        _require_grad(reference_x),
         minimum_cosine=0.9999,
         maximum_relative_rmse=0.01,
     )
     _assert_mixed_close(
-        candidate_branch.grad,
-        reference_branch.grad,
+        _require_grad(candidate_branch),
+        _require_grad(reference_branch),
         minimum_cosine=0.999999,
         maximum_relative_rmse=1e-4,
     )
     assert (
-        candidate_x.grad.untyped_storage().data_ptr()
+        _require_grad(candidate_x).untyped_storage().data_ptr()
         == candidate_merged_cotangent.untyped_storage().data_ptr()
     )
     assert fn.grad is None
@@ -205,8 +212,8 @@ def test_fused_mhc_runs_exact_batch_1_4_16_geometries() -> None:
         )
         assert collapsed.shape == (rows, _HIDDEN)
         assert merged.shape == (rows, _HC, _HIDDEN)
-        assert torch.isfinite(x.grad).all()
-        assert torch.isfinite(branch.grad).all()
+        assert torch.isfinite(_require_grad(x)).all()
+        assert torch.isfinite(_require_grad(branch)).all()
         del x, branch, collapsed, merged
 
 
@@ -294,8 +301,8 @@ def test_mhc_head_matches_transformers_forward_and_activation_gradient() -> None
         maximum_relative_rmse=1e-4,
     )
     _assert_mixed_close(
-        candidate_x.grad,
-        reference_x.grad,
+        _require_grad(candidate_x),
+        _require_grad(reference_x),
         minimum_cosine=0.9999,
         maximum_relative_rmse=0.01,
     )
@@ -313,7 +320,7 @@ def test_mhc_head_runs_exact_batch_1_4_16_geometries() -> None:
         output = deepseek_v4_mhc_head(x, fn, base, scale)
         output.backward(torch.ones_like(output))
         assert output.shape == (rows, _HIDDEN)
-        assert torch.isfinite(x.grad).all()
+        assert torch.isfinite(_require_grad(x)).all()
         del x, output
 
 
@@ -364,17 +371,17 @@ class _MHCIntegrationToy(torch.nn.Module):
             rms_norm_eps=_EPS,
             hidden_size=_HIDDEN,
         )
-        layer = DeepseekV4DecoderLayer.__new__(DeepseekV4DecoderLayer)
+        layer = cast(Any, DeepseekV4DecoderLayer.__new__(DeepseekV4DecoderLayer))
         torch.nn.Module.__init__(layer)
         layer.layer_idx = 0
         layer.self_attn = _ToyAttention()
         layer.mlp = _ToyMLP()
         layer.input_layernorm = torch.nn.Identity()
         layer.post_attention_layernorm = torch.nn.Identity()
-        layer.attn_hc = DeepseekV4HyperConnection(config)
-        layer.ffn_hc = DeepseekV4HyperConnection(config)
+        layer.attn_hc = DeepseekV4HyperConnection(cast(Any, config))
+        layer.ffn_hc = DeepseekV4HyperConnection(cast(Any, config))
         self.layer = layer
-        self.hc_head = DeepseekV4HyperHead(config)
+        self.hc_head = DeepseekV4HyperHead(cast(Any, config))
         self.q_a_proj = torch.nn.Linear(4, 4, bias=False)
 
 
@@ -402,10 +409,10 @@ def test_model_configurator_is_idempotent_and_survives_peft() -> None:
 
     wrapped = get_peft_model(
         model,
-        LoraConfig(target_modules={"q_a_proj"}, r=2, lora_alpha=2),
+        LoraConfig(target_modules=["q_a_proj"], r=2, lora_alpha=2),
         autocast_adapter_dtype=False,
     )
     patched = wrapped.base_model.model
-    assert getattr(patched.layer, "_deepseek_v4_liger_mhc")
-    assert getattr(patched.layer.attn_hc, "_deepseek_v4_liger_mhc")
-    assert getattr(patched.hc_head, "_deepseek_v4_liger_mhc")
+    assert patched.layer._deepseek_v4_liger_mhc
+    assert patched.layer.attn_hc._deepseek_v4_liger_mhc
+    assert patched.hc_head._deepseek_v4_liger_mhc

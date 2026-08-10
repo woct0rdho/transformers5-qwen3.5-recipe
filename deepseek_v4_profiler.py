@@ -138,15 +138,17 @@ def profile_warmed_training_update(
         torch.profiler.ProfilerActivity.CPU,
         torch.profiler.ProfilerActivity.CUDA,
     ]
-    with deepseek_v4_module_ranges(model):
-        with torch.profiler.profile(
+    with (
+        deepseek_v4_module_ranges(model),
+        torch.profiler.profile(
             activities=activities,
             record_shapes=True,
             profile_memory=True,
             with_stack=False,
-        ) as profiler:
-            traced = update("profile_traced")
-            profiler.step()
+        ) as profiler,
+    ):
+        traced = update("profile_traced")
+        profiler.step()
     torch.cuda.synchronize()
     profiler.export_chrome_trace(str(trace_path))
     report = {

@@ -168,7 +168,7 @@ def test_complete_deepseek_expert_lora_preserves_clamp_and_has_finite_gradients(
         clamp_inputs.append((gate.detach(), up.detach()))
         return original_apply(gate, up)
 
-    experts._apply_split_gate = tracked_apply
+    experts.__dict__["_apply_split_gate"] = tracked_apply
     hidden = torch.randn(
         6, 256, device="cuda", dtype=torch.bfloat16, requires_grad=True
     )
@@ -201,11 +201,13 @@ def test_complete_deepseek_expert_lora_preserves_clamp_and_has_finite_gradients(
     assert output.shape == hidden.shape and torch.isfinite(output).all()
     assert hidden.grad is not None and torch.isfinite(hidden.grad).all()
     assert top_k_weights.grad is not None and torch.isfinite(top_k_weights.grad).all()
-    trainable = [
-        parameter for parameter in layer.parameters() if parameter.requires_grad
-    ]
-    assert len(trainable) == 4
-    assert all(parameter.grad is not None for parameter in trainable)
-    assert all(torch.isfinite(parameter.grad).all() for parameter in trainable)
-    assert all(torch.count_nonzero(parameter.grad) > 0 for parameter in trainable)
+    trainable_gradients = []
+    for parameter in layer.parameters():
+        if parameter.requires_grad:
+            if parameter.grad is None:
+                raise AssertionError("expected a trainable parameter gradient")
+            trainable_gradients.append(parameter.grad)
+    assert len(trainable_gradients) == 4
+    assert all(torch.isfinite(gradient).all() for gradient in trainable_gradients)
+    assert all(torch.count_nonzero(gradient) > 0 for gradient in trainable_gradients)
     assert all(parameter.grad is None for parameter in experts.parameters())

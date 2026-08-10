@@ -1683,18 +1683,18 @@ def _launch_local_owner(
 ):
     block_n = config["block_n"]
     grid = (triton.cdiv(_SEQUENCE_LENGTH, block_n), query.shape[0])
-    common = dict(
-        BLOCK_M=config["block_m"],
-        BLOCK_N=block_n,
-        HEAD_DIM=_HEAD_DIM,
-        QUERY_HEADS=_QUERY_HEADS,
-        SEQUENCE_LENGTH=_SEQUENCE_LENGTH,
-        WINDOW_LEFT=_WINDOW_LEFT,
-        HEAD_UNROLL=config["head_unroll"],
-        num_warps=config["num_warps"],
-        num_stages=1,
-        waves_per_eu=config["waves_per_eu"],
-    )
+    common = {
+        "BLOCK_M": config["block_m"],
+        "BLOCK_N": block_n,
+        "HEAD_DIM": _HEAD_DIM,
+        "QUERY_HEADS": _QUERY_HEADS,
+        "SEQUENCE_LENGTH": _SEQUENCE_LENGTH,
+        "WINDOW_LEFT": _WINDOW_LEFT,
+        "HEAD_UNROLL": config["head_unroll"],
+        "num_warps": config["num_warps"],
+        "num_stages": 1,
+        "waves_per_eu": config["waves_per_eu"],
+    }
     if is_key:
         kernel[grid](
             query,
@@ -1739,17 +1739,17 @@ def _launch_compressed_partial(
     head_group = config["head_group"]
     head_groups = _QUERY_HEADS // head_group
     grid = (triton.cdiv(_COMPRESSED_LENGTH, block_n), head_groups, query.shape[0])
-    common = dict(
-        BLOCK_M=config["block_m"],
-        BLOCK_N=block_n,
-        HEAD_DIM=_HEAD_DIM,
-        SEQUENCE_LENGTH=_SEQUENCE_LENGTH,
-        HEAD_GROUP=head_group,
-        HEAD_UNROLL=config["head_unroll"],
-        num_warps=config["num_warps"],
-        num_stages=1,
-        waves_per_eu=config["waves_per_eu"],
-    )
+    common = {
+        "BLOCK_M": config["block_m"],
+        "BLOCK_N": block_n,
+        "HEAD_DIM": _HEAD_DIM,
+        "SEQUENCE_LENGTH": _SEQUENCE_LENGTH,
+        "HEAD_GROUP": head_group,
+        "HEAD_UNROLL": config["head_unroll"],
+        "num_warps": config["num_warps"],
+        "num_stages": 1,
+        "waves_per_eu": config["waves_per_eu"],
+    }
     pack_scores = _PACK_COMPRESSED_SCORES[query.shape[0]]
     if is_key:
         kernel[grid](
@@ -1988,7 +1988,7 @@ class _CSAAttentionFunction(torch.autograd.Function):
         return output
 
     @staticmethod
-    def backward(ctx: Any, grad_output):
+    def backward(ctx: Any, grad_output):  # ty: ignore[invalid-method-override]
         if grad_output is None:
             return None, None, None, None
         (
@@ -2150,7 +2150,7 @@ class _CSAProducerFunction(torch.autograd.Function):
         return output
 
     @staticmethod
-    def backward(ctx: Any, grad_output):
+    def backward(ctx: Any, grad_output):  # ty: ignore[invalid-method-override]
         if grad_output is None:
             return (None,) * 7
         kv, gate, bias, weight, cos, sin = ctx.saved_tensors

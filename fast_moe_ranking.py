@@ -18,7 +18,7 @@ experts, preserving ordinary autograd for router-score gradients.
 """
 
 from types import MethodType
-from typing import Any
+from typing import Any, cast
 
 import torch
 import torch.nn.functional as F
@@ -288,6 +288,7 @@ def _deepseek_topk_router_forward(
     self: DeepseekV4TopKRouter,
     hidden_states: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    self = cast(Any, self)
     flat = hidden_states.reshape(-1, self.hidden_dim)
     logits = F.linear(flat.float(), self.weight.float())
     indices = router_topk_indices(
@@ -306,6 +307,7 @@ def _deepseek_hash_router_forward(
     hidden_states: torch.Tensor,
     input_ids: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    self = cast(Any, self)
     flat = hidden_states.reshape(-1, self.hidden_dim)
     logits = F.linear(flat.float(), self.weight.float())
     indices = self.tid2eid[input_ids.reshape(-1)].long()
@@ -317,7 +319,8 @@ def _deepseek_hash_router_forward(
 def configure_fast_moe_ranking(model: torch.nn.Module) -> dict[str, Any]:
     """Install the fixed-shape Qwen or DeepSeek routing-gate implementation."""
 
-    base = model.get_base_model() if hasattr(model, "get_base_model") else model
+    get_base_model = getattr(model, "get_base_model", None)
+    base = get_base_model() if callable(get_base_model) else model
     model_type = getattr(getattr(base, "config", None), "model_type", None)
     scoring_func = getattr(getattr(base, "config", None), "scoring_func", None)
     paths: dict[str, list[str]] = {"qwen": [], "deepseek_topk": [], "deepseek_hash": []}

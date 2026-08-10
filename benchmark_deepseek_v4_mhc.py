@@ -144,7 +144,11 @@ def _result(
         (collapsed, merged),
         (grad_collapsed, grad_merged.clone()),
     )
-    return collapsed.detach(), merged.detach(), x.grad.detach(), branch.grad.detach()
+    x_grad = x.grad
+    branch_grad = branch.grad
+    if x_grad is None or branch_grad is None:
+        raise RuntimeError("mHC benchmark inputs did not receive gradients")
+    return collapsed.detach(), merged.detach(), x_grad.detach(), branch_grad.detach()
 
 
 def _metric(candidate: torch.Tensor, reference: torch.Tensor) -> dict[str, float]:

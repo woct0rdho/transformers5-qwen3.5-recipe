@@ -8,8 +8,9 @@ import json
 import os
 import time
 from collections import defaultdict
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import bitsandbytes as bnb
 import torch
@@ -210,9 +211,12 @@ def audit_loaded_model(
         errors.append(f"model tensors outside cuda:0: {non_cuda[:8]}")
     if errors:
         raise RuntimeError("DeepSeek V4 load audit failed: " + "; ".join(errors))
+    get_memory_footprint = cast(
+        Callable[[], int], cast(Any, model).get_memory_footprint
+    )
     return observed | {
         "loading_info": cleaned,
-        "model_footprint_bytes": model.get_memory_footprint(),
+        "model_footprint_bytes": get_memory_footprint(),
         "integer_buffer_paths": [name for name, _ in integer_buffers],
     }
 
@@ -229,6 +233,8 @@ def load_fixed_batch(
             "The fixed DeepSeek dataset supports sequence lengths in [2,2048]."
         )
     dataset = load_from_disk(str(dataset_dir))
+    if not isinstance(dataset, Dataset):
+        raise TypeError(f"expected a Dataset at {dataset_dir}, got DatasetDict")
     if row_start < 0 or row_start + batch_size > len(dataset):
         raise IndexError(
             f"requested rows [{row_start},{row_start + batch_size}) outside dataset of {len(dataset)} rows"
@@ -303,9 +309,9 @@ def summarize_gradients(model: torch.nn.Module, label: str) -> dict[str, Any]:
     for family, gradients in sorted(groups.items()):
         finite = torch.stack([torch.isfinite(gradient).all() for gradient in gradients])
         nonzero = torch.stack([torch.count_nonzero(gradient) for gradient in gradients])
-        sum_squares = sum(
-            gradient.float().square().sum().double() for gradient in gradients
-        )
+        sum_squares = torch.stack(
+            [gradient.float().square().sum().double() for gradient in gradients]
+        ).sum()
         maximum = torch.stack(
             [gradient.abs().max().float() for gradient in gradients]
         ).max()
@@ -370,7 +376,7 @@ def representative_packed_state(model: torch.nn.Module) -> dict[str, Any]:
     selected: dict[int, tuple[str, GGUFQuantizedTensor]] = {}
     for name, parameter in model.named_parameters():
         if isinstance(parameter, GGUFQuantizedTensor):
-            selected.setdefault(int(parameter.quant_type), (name, parameter))
+            selected.setdefault(int(cast(Any, parameter.quant_type)), (name, parameter))
     result = {}
     for quant_type in (8, 10, 16):
         name, parameter = selected[quant_type]
@@ -835,7 +841,7 @@ def main() -> None:
         report["error"] = {"type": type(error).__name__, "message": str(error)}
         try:
             report["memory_at_failure"] = memory_snapshot()
-        except BaseException as memory_error:
+        except Exception as memory_error:  # noqa: BLE001 - preserve original failure
             report["memory_at_failure_error"] = str(memory_error)
         persist()
         raise

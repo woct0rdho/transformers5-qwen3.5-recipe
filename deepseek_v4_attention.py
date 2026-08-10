@@ -1,6 +1,6 @@
 import math
 import types
-from typing import Any
+from typing import Any, cast
 
 import torch
 from transformers.masking_utils import ALL_MASK_ATTENTION_FUNCTIONS, eager_mask
@@ -112,7 +112,7 @@ def _deepseek_v4_attention_forward(
     value: torch.Tensor,
     attention_mask: torch.Tensor | None,
     scaling: float,
-    dropout: float | int = 0.0,
+    dropout: float = 0.0,
     **kwargs: Any,
 ):
     if module.layer_type != "sliding_attention":
@@ -198,7 +198,7 @@ def _deepseek_v4_csa_module_forward(
     if (
         compressor is None
         or compressor.compress_rate != 4
-        or compressor.indexer.index_topk != _COMPRESSED_LENGTH
+        or cast(Any, compressor.indexer).index_topk != _COMPRESSED_LENGTH
     ):
         raise ValueError("DeepSeek V4 CSA requires rate 4 and top-k 512")
 
@@ -412,15 +412,16 @@ def _validate_config(config: DeepseekV4Config) -> None:
         for name, value in expected.items()
         if getattr(config, name, None) != value
     }
-    if config.compress_rates.get("compressed_sparse_attention") != 4:
+    compress_rates = config.compress_rates or {}
+    if compress_rates.get("compressed_sparse_attention") != 4:
         mismatches["compress_rate_csa"] = (
             4,
-            config.compress_rates.get("compressed_sparse_attention"),
+            compress_rates.get("compressed_sparse_attention"),
         )
-    if config.compress_rates.get("heavily_compressed_attention") != 128:
+    if compress_rates.get("heavily_compressed_attention") != 128:
         mismatches["compress_rate_hca"] = (
             128,
-            config.compress_rates.get("heavily_compressed_attention"),
+            compress_rates.get("heavily_compressed_attention"),
         )
     if mismatches:
         raise RuntimeError(f"unsupported DeepSeek V4 attention config: {mismatches}")
@@ -521,7 +522,7 @@ def require_complete_deepseek_v4_attention(report: dict[str, Any]) -> None:
         "heavily_compressed_attention": _EXPECTED_HCA,
         "hooked_models": 1,
     }
-    mismatches = {
+    mismatches: dict[str, tuple[Any, Any]] = {
         name: (value, report.get(name))
         for name, value in expected.items()
         if report.get(name) != value

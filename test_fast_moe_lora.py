@@ -47,6 +47,12 @@ _MODEL = Path(
 )
 
 
+def _require_grad(tensor: torch.Tensor) -> torch.Tensor:
+    if tensor.grad is None:
+        raise AssertionError("expected a tensor gradient")
+    return tensor.grad
+
+
 @pytest.fixture(autouse=True)
 def synthetic_aiter_configs(monkeypatch) -> None:
     config = {
@@ -192,7 +198,9 @@ def test_packed_expert_projection_backward_is_exact_logical_jacobian(
     )
     # Paired packed backward combines both terms in one FP32 accumulator and
     # rounds once to BF16, so Torch GEMM may differ only by reduction order.
-    torch.testing.assert_close(hidden.grad, expected_hidden_grad, rtol=0, atol=1e-4)
+    torch.testing.assert_close(
+        _require_grad(hidden), expected_hidden_grad, rtol=0, atol=1e-4
+    )
     assert gate.grad is None
     assert up.grad is None
 
@@ -266,7 +274,7 @@ def test_packed_expert_projection_backward_is_exact_logical_jacobian(
         down_grad, logical_down.transpose(1, 2), group_sizes
     )
     torch.testing.assert_close(
-        intermediate.grad, expected_intermediate_grad, rtol=0, atol=0
+        _require_grad(intermediate), expected_intermediate_grad, rtol=0, atol=0
     )
     assert down.grad is None
 
@@ -479,16 +487,18 @@ def test_one_expert_layer_has_finite_lora_gradients_and_no_packed_gradients(
         output = layer(hidden, top_k_index, top_k_weights)
         output.backward(grad_output)
 
-    trainable_gradients = [
-        parameter.grad for parameter in layer.parameters() if parameter.requires_grad
-    ]
+    trainable_gradients = []
+    for parameter in layer.parameters():
+        if parameter.requires_grad:
+            if parameter.grad is None:
+                raise AssertionError("expected a trainable parameter gradient")
+            trainable_gradients.append(parameter.grad)
     assert output.shape == hidden.shape
     assert torch.isfinite(output).all()
     assert hidden.grad is not None and torch.isfinite(hidden.grad).all()
     assert top_k_weights.grad is not None and torch.isfinite(top_k_weights.grad).all()
     assert torch.count_nonzero(top_k_weights.grad) > 0
     assert len(trainable_gradients) == 4
-    assert all(gradient is not None for gradient in trainable_gradients)
     assert all(torch.isfinite(gradient).all() for gradient in trainable_gradients)
     assert all(torch.count_nonzero(gradient) > 0 for gradient in trainable_gradients)
     active_experts = torch.unique(top_k_index)

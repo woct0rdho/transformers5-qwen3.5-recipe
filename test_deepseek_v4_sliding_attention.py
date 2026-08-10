@@ -1,5 +1,6 @@
 import math
 from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 import torch
@@ -295,7 +296,7 @@ def test_attention_dispatch_uses_sliding_kernel_without_layout_copies() -> None:
 
     with torch.no_grad():
         dispatched, weights = _deepseek_v4_attention_forward(
-            module,
+            cast(Any, module),
             query,
             shared_kv,
             shared_kv,
@@ -328,7 +329,7 @@ def test_canonical_mask_has_one_physical_batch() -> None:
 def test_model_input_guard_rejects_noncanonical_shape() -> None:
     with pytest.raises(ValueError, match=r"B in \{1,4,16\} and S=2048"):
         _validate_model_inputs(
-            None,
+            cast(Any, None),
             (),
             {"input_ids": torch.zeros(1, 1024, device="cuda", dtype=torch.long)},
         )

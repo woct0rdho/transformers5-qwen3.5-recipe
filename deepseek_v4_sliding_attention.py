@@ -794,7 +794,7 @@ class _DeepseekV4SlidingAttentionFunction(torch.autograd.Function):
         return output
 
     @staticmethod
-    def backward(
+    def backward(  # ty: ignore[invalid-method-override]
         ctx: Any,
         grad_output: torch.Tensor | None,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:

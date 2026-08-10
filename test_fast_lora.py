@@ -24,6 +24,12 @@ _MODEL = Path(
 )
 
 
+def _require_grad(tensor: torch.Tensor) -> torch.Tensor:
+    if tensor.grad is None:
+        raise AssertionError("expected a tensor gradient")
+    return tensor.grad
+
+
 def test_fast_lora_keeps_original_bf16_input_and_exact_base_jacobian() -> None:
     if not _MODEL.is_file():
         pytest.skip("GGUF model is unavailable")
@@ -97,9 +103,9 @@ def test_fast_lora_keeps_original_bf16_input_and_exact_base_jacobian() -> None:
         actual.backward(grad_output)
     assert "torch_ggml_ops.mmq.default" in dispatched_ops
     assert "torch_ggml_ops.mmq_grad_input.default" in dispatched_ops
-    actual_input_grad = input.grad.detach().clone()
-    actual_a_grad = layer.lora_A["default"].weight.grad.detach().clone()
-    actual_b_grad = layer.lora_B["default"].weight.grad.detach().clone()
+    actual_input_grad = _require_grad(input).detach().clone()
+    actual_a_grad = _require_grad(layer.lora_A["default"].weight).detach().clone()
+    actual_b_grad = _require_grad(layer.lora_B["default"].weight).detach().clone()
 
     logical_weight = dequantize_gguf_tensor(
         payload,
@@ -121,9 +127,11 @@ def test_fast_lora_keeps_original_bf16_input_and_exact_base_jacobian() -> None:
     ).reshape_as(actual)
     output_ref.backward(grad_output)
 
-    torch.testing.assert_close(actual_input_grad, input_ref.grad, rtol=0, atol=0)
-    torch.testing.assert_close(actual_a_grad, a_ref.grad, rtol=0, atol=0)
-    torch.testing.assert_close(actual_b_grad, b_ref.grad, rtol=0, atol=0)
+    torch.testing.assert_close(
+        actual_input_grad, _require_grad(input_ref), rtol=0, atol=0
+    )
+    torch.testing.assert_close(actual_a_grad, _require_grad(a_ref), rtol=0, atol=0)
+    torch.testing.assert_close(actual_b_grad, _require_grad(b_ref), rtol=0, atol=0)
     assert layer.base_layer.weight.grad is None
 
     mmq_base = torch_ggml_ops.mmq(input.detach(), payload, int(tensor.tensor_type), 37)

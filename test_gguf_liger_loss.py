@@ -28,6 +28,12 @@ _MODEL = Path(
 )
 
 
+def _require_tensor(value: torch.Tensor | None) -> torch.Tensor:
+    if value is None:
+        raise AssertionError("expected a tensor")
+    return value
+
+
 class _MMQCounter(TorchDispatchMode):
     def __init__(self):
         super().__init__()
@@ -133,8 +139,8 @@ def test_packed_q8_liger_loss_matches_logical_reference_and_uses_native_ops(
     loss_relative_error = float(
         ((packed_loss - reference_loss).abs() / reference_loss.abs()).detach()
     )
-    reference_gradient = hidden_reference.grad.float()
-    packed_gradient = hidden_packed.grad.float()
+    reference_gradient = _require_tensor(hidden_reference.grad).float()
+    packed_gradient = _require_tensor(hidden_packed.grad).float()
     gradient_cosine = float(
         torch.nn.functional.cosine_similarity(
             reference_gradient.flatten(), packed_gradient.flatten(), dim=0
@@ -148,10 +154,14 @@ def test_packed_q8_liger_loss_matches_logical_reference_and_uses_native_ops(
     assert loss_relative_error < 5e-3
     assert gradient_cosine > 0.999
     assert gradient_relative_l2 < 0.03
+    packed_accuracy = _require_tensor(packed_accuracy)
+    reference_accuracy = _require_tensor(reference_accuracy)
+    packed_predictions = _require_tensor(packed_predictions)
+    reference_predictions = _require_tensor(reference_predictions)
     assert packed_accuracy.shape == reference_accuracy.shape == torch.Size([])
     assert packed_predictions.shape == reference_predictions.shape == (rows,)
     assert torch.isfinite(packed_loss)
-    assert torch.isfinite(hidden_packed.grad).all()
+    assert torch.isfinite(_require_tensor(hidden_packed.grad)).all()
     assert q6_lm_head.weight.grad is None
     assert _PACKED_LM_HEAD_CHUNK_SIZE == 256
     expected_calls = math.ceil(rows / _PACKED_LM_HEAD_CHUNK_SIZE)

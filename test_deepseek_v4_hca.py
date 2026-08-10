@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 import torch
@@ -50,7 +51,12 @@ def test_hca_attention_exact_shape_matches_blockwise_reference() -> None:
     reference_inputs = tuple(
         tensor.detach().clone().requires_grad_() for tensor in candidate_inputs
     )
-    reference = reference_hca_attention(*reference_inputs)
+    reference = reference_hca_attention(
+        reference_inputs[0],
+        reference_inputs[1],
+        reference_inputs[2],
+        reference_inputs[3],
+    )
     reference_gradients = torch.autograd.grad(
         reference, reference_inputs, output_gradient
     )
@@ -105,7 +111,8 @@ def test_hca_producer_exact_shape_matches_reference() -> None:
         for name in ("compressor_kv", "compressor_gate")
     )
     candidate = deepseek_v4_hca_compress(
-        *candidate_inputs,
+        candidate_inputs[0],
+        candidate_inputs[1],
         values["position_bias"],
         values["weight"],
         values["cos"],
@@ -120,7 +127,8 @@ def test_hca_producer_exact_shape_matches_reference() -> None:
         tensor.detach().clone().requires_grad_() for tensor in candidate_inputs
     )
     reference = reference_hca_compress(
-        *reference_inputs,
+        reference_inputs[0],
+        reference_inputs[1],
         values["position_bias"],
         values["weight"],
         values["cos"],
@@ -331,7 +339,7 @@ def test_hca_module_dispatch_rejects_wrong_rate() -> None:
     )
     with pytest.raises(ValueError, match="rate 128"):
         _deepseek_v4_hca_module_forward(
-            module,
+            cast(Any, module),
             hidden_states,
             position_embeddings,
             position_ids,

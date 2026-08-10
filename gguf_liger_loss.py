@@ -8,10 +8,9 @@ full-sequence logits tensor is materialized.
 """
 
 from types import MethodType
-from typing import Any
+from typing import Any, cast
 
 import torch
-import torch.nn as nn
 import torch_ggml_ops  # noqa: F401 Register the native packed operators.
 import triton
 from liger_kernel.ops.cross_entropy import liger_cross_entropy_kernel
@@ -24,6 +23,7 @@ from liger_kernel.transformers.model.loss_utils import unpack_cross_entropy_resu
 from liger_kernel.transformers.model.output_classes import (
     LigerMoeCausalLMOutputWithPast,
 )
+from torch import nn
 from transformers.integrations.gguf import GGUFLinear
 from transformers.integrations.gguf_dequant import GGUFQuantizedTensor
 from transformers.modeling_outputs import MoeModelOutputWithPast
@@ -114,11 +114,27 @@ def _packed_q8_linear_cross_entropy_forward(
         )
         target_chunk = target[start:end].contiguous()
         loss_1d_slice = loss_1d[start:end]
-        token_accuracy_1d_slice = (
-            token_accuracy_1d[start:end] if return_token_accuracy else None
+        if return_token_accuracy:
+            if token_accuracy_1d is None:
+                raise RuntimeError("token accuracy storage was not allocated")
+            token_accuracy_1d_slice = token_accuracy_1d[start:end]
+        else:
+            token_accuracy_1d_slice = None
+        if return_predicted_tokens:
+            if predicted_tokens_1d is None:
+                raise RuntimeError("predicted-token storage was not allocated")
+            predicted_tokens_1d_slice = predicted_tokens_1d[start:end]
+        else:
+            predicted_tokens_1d_slice = None
+        token_accuracy_stride = (
+            token_accuracy_1d_slice.stride(-1)
+            if token_accuracy_1d_slice is not None
+            else 0
         )
-        predicted_tokens_1d_slice = (
-            predicted_tokens_1d[start:end] if return_predicted_tokens else None
+        predicted_tokens_stride = (
+            predicted_tokens_1d_slice.stride(-1)
+            if predicted_tokens_1d_slice is not None
+            else 0
         )
 
         liger_cross_entropy_kernel[(end - start,)](
@@ -131,13 +147,9 @@ def _packed_q8_linear_cross_entropy_forward(
             z_loss_ptr=None,
             loss_stride=loss_1d_slice.stride(-1),
             token_accuracy_ptr=token_accuracy_1d_slice,
-            token_accuracy_stride=(
-                token_accuracy_1d_slice.stride(-1) if return_token_accuracy else 0
-            ),
+            token_accuracy_stride=token_accuracy_stride,
             predicted_tokens_ptr=predicted_tokens_1d_slice,
-            predicted_tokens_stride=(
-                predicted_tokens_1d_slice.stride(-1) if return_predicted_tokens else 0
-            ),
+            predicted_tokens_stride=predicted_tokens_stride,
             n_cols=out_features,
             n_non_ignore=total_n_non_ignore,
             sum_non_ignore_weight=total_n_non_ignore,
@@ -165,11 +177,12 @@ def _packed_q8_linear_cross_entropy_forward(
         )
 
     loss = torch.sum(loss_1d)
-    token_accuracy = (
-        torch.sum(token_accuracy_1d) / total_n_non_ignore
-        if return_token_accuracy
-        else None
-    )
+    if return_token_accuracy:
+        if token_accuracy_1d is None:
+            raise RuntimeError("token accuracy storage was not allocated")
+        token_accuracy = torch.sum(token_accuracy_1d) / total_n_non_ignore
+    else:
+        token_accuracy = None
     return loss, token_accuracy, predicted_tokens_1d, grad_input
 
 
@@ -303,7 +316,8 @@ def _packed_q8_liger_for_causal_lm_loss(
         raise RuntimeError(
             "Packed GGUF LM-head loss is validated only for hidden size 2048."
         )
-    if int(lm_head.weight.quant_type) != 14:
+    quant_type = int(cast(Any, lm_head.weight.quant_type))
+    if quant_type != 14:
         raise RuntimeError(
             "Packed GGUF LM-head loss is validated only for Q6_K weights."
         )
@@ -323,7 +337,7 @@ def _packed_q8_liger_for_causal_lm_loss(
             hidden_states,
             payload,
             shift_labels,
-            int(lm_head.weight.quant_type),
+            quant_type,
             lm_head.out_features,
             _PACKED_LM_HEAD_CHUNK_SIZE,
             ignore_index,
@@ -398,6 +412,8 @@ def gguf_liger_lce_forward(
     )
 
     hidden_states = outputs.last_hidden_state
+    if hidden_states is None:
+        raise RuntimeError("Qwen model did not return hidden states")
     slice_indices = (
         slice(-logits_to_keep, None)
         if isinstance(logits_to_keep, int)
@@ -459,13 +475,18 @@ def gguf_liger_lce_forward(
 
     aux_loss = None
     if output_router_logits:
-        aux_loss = load_balancing_loss_func(
-            outputs.router_logits,
-            self.num_experts,
-            self.num_experts_per_tok,
-            attention_mask,
+        aux_loss = cast(
+            torch.Tensor,
+            load_balancing_loss_func(
+                outputs.router_logits,
+                self.num_experts,
+                self.num_experts_per_tok,
+                attention_mask,
+            ),
         )
         if labels is not None:
+            if loss is None:
+                raise RuntimeError("router auxiliary loss requires a primary loss")
             loss = loss + self.router_aux_loss_coef * aux_loss.to(loss.device)
 
     if not return_dict:
@@ -479,8 +500,8 @@ def gguf_liger_lce_forward(
         return output
 
     return LigerMoeCausalLMOutputWithPast(
-        loss=loss,
-        aux_loss=aux_loss,
+        loss=cast(Any, loss),
+        aux_loss=cast(Any, aux_loss),
         logits=logits,
         past_key_values=outputs.past_key_values,
         hidden_states=outputs.hidden_states,
@@ -496,7 +517,8 @@ def apply_gguf_liger_fused_linear_cross_entropy(
 ) -> Qwen3_5MoeForCausalLM:
     """Patch one loaded text model with the GGUF-aware Liger loss forward."""
 
-    target = model.get_base_model() if hasattr(model, "get_base_model") else model
+    get_base_model = getattr(model, "get_base_model", None)
+    target = get_base_model() if callable(get_base_model) else model
     if not isinstance(target, Qwen3_5MoeForCausalLM):
         raise TypeError(
             "GGUF-aware Liger loss requires Qwen3_5MoeForCausalLM after unwrapping PEFT, "

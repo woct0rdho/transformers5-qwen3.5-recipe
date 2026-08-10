@@ -18,6 +18,12 @@ _HIDDEN = 2048
 _ROUTES = _TOKENS * _TOP_K
 
 
+def _require_grad(tensor: torch.Tensor) -> torch.Tensor:
+    if tensor.grad is None:
+        raise AssertionError("expected a tensor gradient")
+    return tensor.grad
+
+
 class _RecordOps(TorchDispatchMode):
     def __init__(self, dispatched_ops: list[str]) -> None:
         super().__init__()
@@ -221,8 +227,12 @@ def test_route_combine_forward_and_backward_match_reference(
         actual.backward(grad_final)
     expected.backward(grad_final)
 
-    torch.testing.assert_close(output.grad, reference_output.grad, rtol=0, atol=0)
-    _assert_reasonable_routing_gradient(routing_weights.grad, reference_weights.grad)
+    torch.testing.assert_close(
+        _require_grad(output), _require_grad(reference_output), rtol=0, atol=0
+    )
+    _assert_reasonable_routing_gradient(
+        _require_grad(routing_weights), _require_grad(reference_weights)
+    )
     assert not any("_index_put_impl_" in operation for operation in dispatched_ops)
 
 
@@ -303,8 +313,12 @@ def test_noncanonical_token_count_matches_reference(
     )
 
     torch.testing.assert_close(hidden.grad, reference_hidden.grad, rtol=0, atol=0)
-    torch.testing.assert_close(output.grad, reference_output.grad, rtol=0, atol=0)
-    _assert_reasonable_routing_gradient(routing_weights.grad, reference_weights.grad)
+    torch.testing.assert_close(
+        _require_grad(output), _require_grad(reference_output), rtol=0, atol=0
+    )
+    _assert_reasonable_routing_gradient(
+        _require_grad(routing_weights), _require_grad(reference_weights)
+    )
 
 
 def test_unknown_routing_shape_is_rejected() -> None:

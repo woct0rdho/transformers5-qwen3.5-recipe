@@ -1,11 +1,10 @@
-from typing import Any
+from typing import Any, cast
 
 import torch
 from peft import LoraConfig
 from transformers.integrations.gguf import (
     ALL_GGUF_EXPERTS_FUNCTIONS,
     DeepseekV4GGUFExperts,
-    GGUFExperts,
 )
 
 from deepseek_v4_lora import DEEPSEEK_V4_TARGET_MODULES_PATTERN
@@ -43,7 +42,7 @@ class DeepseekV4GGUFMoeLora(FastGGUFMoeLora):
 
 
 def deepseek_v4_gguf_dequant_aiter_lora_forward(
-    self: GGUFExperts,
+    self: Any,
     hidden_states: torch.Tensor,
     top_k_index: torch.Tensor,
     top_k_weights: torch.Tensor,
@@ -86,10 +85,10 @@ def register_deepseek_v4_moe_lora(
     else:
         target_modules = set(lora_config.target_modules or ())
         target_modules.add("experts")
-        lora_config.target_modules = target_modules
+        lora_config.__dict__["target_modules"] = target_modules
     ALL_GGUF_EXPERTS_FUNCTIONS[EXPERTS_IMPLEMENTATION] = (
         deepseek_v4_gguf_dequant_aiter_lora_forward
     )
-    model.set_experts_implementation(EXPERTS_IMPLEMENTATION)
+    cast(Any, model).set_experts_implementation(EXPERTS_IMPLEMENTATION)
     register({DeepseekV4GGUFExperts: DeepseekV4GGUFMoeLora})
     return lora_config
