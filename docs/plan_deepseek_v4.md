@@ -215,7 +215,7 @@ DeepSeek checkpoint-charged routed-LoRA complete medians are:
 
 The retained implementation always passes all 256 expert factor planes and uses a contiguous 256-entry `int32` group-size vector with zero sizes for inactive experts. Packed frozen MMQ remains compact-active. There are no factor `index_select` allocations, factor-scatter autograd paths, implicit contiguous repairs, or square-matrix workarounds.
 
-`moe_gmm_configs.py` owns exactly 66 GMM keys `(M,K,N,RHS-layout)` and 33 PTGMM keys `(M,K,N)` for the required DeepSeek/Qwen B1/B4/B16 shapes. Layout is part of GMM identity. Unsupported shapes fail closed because the measured table does not support a reliable general heuristic.
+`moe_gmm_configs.py` owns exactly 66 GMM keys `(M,K,N,RHS-layout)` and 33 PTGMM keys `(M,K,N)` for the required DeepSeek/Qwen B1/B4/B16 shapes. Layout is part of GMM identity. Unsupported shapes fail closed because the measured table does not support a reliable general heuristic. The coefficient-only priors, bounded per-key search, and confirmation evidence are recorded in [aiter_gmm_ptgmm_coefficient_prior_tuning.md](aiter_gmm_ptgmm_coefficient_prior_tuning.md).
 
 Outputs, hidden gradients, active factor gradients, inactive zero gradients, sparse routes, and non-reentrant checkpoint replay are bitwise equal to the compact correctness control.
 
@@ -345,8 +345,8 @@ Rejected or deferred:
 - Per-route factor `index_select` was rejected because it allocates gathered factor planes and introduces `IndexSelectBackward` zero/scatter work during both original forward and checkpoint replay.
 - A compact/full active-count selector recovered only small component differences. Compact sparse B1 was 2.6% faster for DeepSeek and 2.3% faster for Qwen, but the dual ownership was not justified. One unconditional full-group path is retained.
 - Implicit `.contiguous()` repair and the square-matrix input-gradient workaround were rejected because they hide unsupported layouts and can introduce copies or incorrect transpose ownership.
-- A general GMM/PTGMM heuristic was rejected because the accepted targets use 57 distinct GMM configs across 66 keys and 27 PTGMM configs across 33 keys, with non-monotonic batch and layout changes. Unmeasured shapes fail closed.
-- Large Cartesian tuning was rejected in favor of bounded one-parameter coordinate slices and interleaved acceptance. Ordinary LoRA GEMM retuning remains closed because hipBLASLt already owns that BF16 boundary.
+- A general GMM/PTGMM heuristic was rejected because the accepted targets use 54 distinct GMM configs across 66 keys and 30 PTGMM configs across 33 keys, with non-monotonic batch and layout changes. Unmeasured shapes fail closed.
+- Large Cartesian tuning was rejected in favor of bounded one-parameter coordinate slices followed by coefficient-profile reversed-order confirmation. Ordinary LoRA GEMM retuning remains closed because hipBLASLt already owns that BF16 boundary.
 
 ### Integration and cleanup
 
