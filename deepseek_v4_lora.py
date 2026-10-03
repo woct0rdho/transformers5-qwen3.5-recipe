@@ -99,9 +99,9 @@ def _deepseek_v4_fixed_grouped_mmq_forward(
 ) -> torch.Tensor:
     """Run DeepSeek's frozen eight-group Q8_0 output-A projection natively.
 
-    ``GgufGroupedLinear`` exposes a public ``[... , 8, 4096] -> [..., 8,
-    1024]`` projection while its packed parameter is a flattened physical
-    ``[8192, 4352]`` payload. Flattening it through ``GgufLinear`` would lose
+    `GgufGroupedLinear` exposes a public `[... , 8, 4096] -> [..., 8,
+    1024]` projection while its packed parameter is a flattened physical
+    `[8192, 4352]` payload. Flattening it through `GgufLinear` would lose
     the group boundary and the stock Transformers autograd path materializes
     the whole logical matrix. The fixed grouped operator owns that layout.
     """
@@ -161,8 +161,8 @@ _GROUPED_MMQ_SPECS = (
 def configure_deepseek_v4_grouped_mmq(model: torch.nn.Module) -> dict[str, Any]:
     """Install the native fixed-grouped Q8_0 path on one model instance.
 
-    The modules deliberately remain ordinary frozen ``GgufGroupedLinear``
-    instances: no PEFT wrapper or grouped ``o_a_proj`` adapter is created.
+    The modules deliberately remain ordinary frozen `GgufGroupedLinear`
+    instances: no PEFT wrapper or grouped `o_a_proj` adapter is created.
     This hardcoded DeepSeek integration fails closed instead of retaining the
     logical grouped fallback when the checkpoint contract does not match.
     """

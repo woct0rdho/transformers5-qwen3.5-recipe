@@ -421,6 +421,7 @@ def test_model_configurator_is_idempotent_and_survives_peft() -> None:
         autocast_adapter_dtype=False,
     )
     patched = wrapped.base_model.model
+    assert isinstance(patched, _MHCIntegrationToy)
     assert getattr(patched.layer, _MHC_MARKER)
     assert getattr(patched.layer.attn_hc, _MHC_MARKER)
     assert getattr(patched.hc_head, _MHC_MARKER)

@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 """Qwen3.5-MoE full-step correctness, memory, gradient, and profiling audit."""
 
+import os
+
+os.environ["HF_HUB_OFFLINE"] = "1"
+os.environ["TRANSFORMERS_OFFLINE"] = "1"
+
 import argparse
 import gc
 import json
-import os
 from pathlib import Path
 from typing import Any, cast
 

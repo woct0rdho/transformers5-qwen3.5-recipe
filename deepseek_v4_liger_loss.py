@@ -2,7 +2,7 @@
 
 The reference helper intentionally remains available for correctness audits.
 The model-instance patch uses the shared packed helper: the shared
-``packed_liger_loss`` module owns the chunked Q8_1 MMQ, the in-place Liger
+`packed_liger_loss` module owns the chunked Q8_1 MMQ, the in-place Liger
 cross-entropy, the packed logical input Jacobian, and the scoped-forward
 contract. This module owns the DeepSeek entry points and its validated
 constants (Q8_0 head, 512-row chunks). No logical vocabulary matrix or

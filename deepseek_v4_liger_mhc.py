@@ -7,8 +7,8 @@ HC=4, hidden size 4096, BF16 activations, FP32 controls with a native-layout
 F16 projection cache, 20 Sinkhorn iterations, and physical
 sequence-2048 batches 1, 4, and 16.
 
-``deepseek_v4_mhc_prepare`` returns the residual streams as an alias. Passing
-that alias to ``deepseek_v4_mhc_merge`` routes the direct residual gradient back
+`deepseek_v4_mhc_prepare` returns the residual streams as an alias. Passing
+that alias to `deepseek_v4_mhc_merge` routes the direct residual gradient back
 through the prepare backward, where it is updated in place with collapse and
 coefficient-mediated gradients. Merge backward reuses its dead incoming
 cotangent for that path. This avoids a second full activation-gradient
@@ -1052,7 +1052,7 @@ def _freeze_fp32_control(
 
 
 class _ControlCounters:
-    """Per-pass counters for the parameter work ``prepare`` performs."""
+    """Per-pass counters for the parameter work `prepare` performs."""
 
     def __init__(self) -> None:
         self.f16_projection_parameters = 0

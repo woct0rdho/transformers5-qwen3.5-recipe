@@ -5,7 +5,7 @@ import time
 from collections import defaultdict
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import torch
 from transformers.integrations.gguf.gguf_quantized_parameter import (
@@ -262,7 +262,7 @@ def representative_packed_state(model: torch.nn.Module) -> dict[str, Any]:
     selected: dict[int, tuple[str, GgufQuantizedParameter]] = {}
     for name, parameter in model.named_parameters():
         if isinstance(parameter, GgufQuantizedParameter):
-            selected.setdefault(int(cast(Any, parameter.quant_type)), (name, parameter))
+            selected.setdefault(int(parameter.quant_type), (name, parameter))
     if not selected:
         raise RuntimeError("The audited model has no packed GGUF parameters.")
 

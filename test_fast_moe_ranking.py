@@ -205,8 +205,8 @@ def test_router_configuration_binds_prior_to_owning_experts() -> None:
 
     assert result["deepseek_hash"] == 1
     assert result["deepseek_topk"] == 1
-    first_experts = cast(torch.nn.Module, model.layers[0].experts)
-    second_experts = cast(torch.nn.Module, model.layers[1].experts)
+    first_experts = model.layers[0].experts
+    second_experts = model.layers[1].experts
     assert first_experts.__dict__["_aiter_expert_prior"] == "deepseek-hash"
     assert second_experts.__dict__["_aiter_expert_prior"] == "deepseek-learned"
 

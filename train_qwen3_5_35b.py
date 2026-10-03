@@ -5,8 +5,10 @@ import os
 os.environ["TORCH_LOGS"] = "recompiles"
 os.environ["TRITON_PRINT_AUTOTUNING"] = "1"
 
+os.environ["HF_HUB_OFFLINE"] = "1"
+os.environ["TRANSFORMERS_OFFLINE"] = "1"
+
 from pathlib import Path
-from typing import Any, cast
 
 import torch
 from datasets import Dataset, load_from_disk
@@ -14,6 +16,7 @@ from peft import LoraConfig, TaskType, get_peft_model
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
+    PreTrainedTokenizerBase,
     TrainingArguments,
     default_data_collator,
     set_seed,
@@ -59,14 +62,12 @@ def main():
     configure_qwen35_flash_attention_2()
     configure_qwen35_fla()
 
-    tokenizer = cast(
-        Any,
-        AutoTokenizer.from_pretrained(
-            model_dir,
-            gguf_file=gguf_file,
-            local_files_only=True,
-        ),
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_dir,
+        gguf_file=gguf_file,
+        local_files_only=True,
     )
+    assert isinstance(tokenizer, PreTrainedTokenizerBase)
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
 

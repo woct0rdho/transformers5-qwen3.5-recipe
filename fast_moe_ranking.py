@@ -2,27 +2,26 @@
 
 The optimized training workloads are sequence length 2,048 at physical batches
 1, 4, and 16:
-
-* Qwen3.5/3.6: ``[2048|8192|32768, 2048]`` hidden states, 256 experts,
+- Qwen3.5/3.6: `[2048|8192|32768, 2048]` hidden states, 256 experts,
   top-8 selection, and 16,384/65,536/262,144 routed rows.
-* DeepSeek V4 learned routers: ``[2048|8192|32768, 4096]`` hidden states,
+- DeepSeek V4 learned routers: `[2048|8192|32768, 4096]` hidden states,
   256 experts, top-6 sqrt-softplus-plus-correction-bias selection, and
   12,288/49,152/196,608 routed rows.
-* DeepSeek V4 hash routers have the same hidden/expert geometry and top-6
+- DeepSeek V4 hash routers have the same hidden/expert geometry and top-6
   weights, but their expert IDs come from the fixed token lookup table. Because
   the lookup fixes the six experts before any projection, their logits are
   projected directly from the selected gate rows instead of a 256-expert
   projection. No full-width score tensor is materialized.
 
-The learned-router projection is a normal BF16 ``F.linear`` (FP32 internal
+The learned-router projection is a normal BF16 `F.linear` (FP32 internal
 accumulation) whose BF16 result is upcast to FP32 so the scoring path stays in
 FP32. The Triton kernel replaces full-width softmax/sqrt-softplus plus
-``torch.topk`` with one 256-expert streaming selection. Normalization is then
+`torch.topk` with one 256-expert streaming selection. Normalization is then
 evaluated only for the selected 8 or 6 experts, preserving ordinary autograd
 for router-score gradients.
 """
 
-from typing import Any, cast
+from typing import Any
 
 import torch
 import torch.nn.functional as F
@@ -66,7 +65,7 @@ def _is_supported_router_geometry(
 
 
 def _router_topk_launch(num_tokens: int) -> tuple[int, int, int]:
-    """Return ``(BLOCK_M, BLOCK_N, num_warps)`` for the fixed token buckets.
+    """Return `(BLOCK_M, BLOCK_N, num_warps)` for the fixed token buckets.
 
     The expert axis always has 256 entries. A 64-expert streaming tile won for
     both statically specialized top-8 identity scoring and top-6
@@ -126,7 +125,7 @@ def _streaming_router_topk(
     APPLY_SQRT_SOFTPLUS: tl.constexpr,
     HAS_CORRECTION_BIAS: tl.constexpr,
 ):
-    """Return eight sorted packed ``(score, inverse-index)`` keys per row."""
+    """Return eight sorted packed `(score, inverse-index)` keys per row."""
 
     score_dtype: tl.constexpr = (
         tl.float32 if APPLY_SQRT_SOFTPLUS else logits.dtype.element_ty
@@ -363,7 +362,7 @@ class _DeepseekHashRouterLogits(torch.autograd.Function):
     """Six hash-selected expert logits for the fixed DeepSeek V4 geometry.
 
     The token lookup fixes the selected experts, so only their dot products are
-    evaluated. Backward accumulates ``grad_logits[k] * weight[expert_k]`` in
+    evaluated. Backward accumulates `grad_logits[k] * weight[expert_k]` in
     FP32 and rounds once to the BF16 activation boundary. The frozen gate table
     needs no gradient.
     """
@@ -428,7 +427,7 @@ def hash_router_selected_logits(
     weight: torch.Tensor,
     indices: torch.Tensor,
 ) -> torch.Tensor:
-    """Return the six hash-selected expert logits as FP32 ``[tokens,6]``."""
+    """Return the six hash-selected expert logits as FP32 `[tokens,6]`."""
 
     if hidden_states.ndim != 2 or weight.ndim != 2 or indices.ndim != 2:
         raise ValueError(
@@ -496,7 +495,6 @@ def _deepseek_topk_router_forward(
     self: DeepseekV4TopKRouter,
     hidden_states: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    self = cast(Any, self)
     flat = hidden_states.reshape(-1, self.hidden_dim)
     logits = F.linear(flat, self.weight).to(torch.float32)
     indices = router_topk_indices(
@@ -515,7 +513,6 @@ def _deepseek_hash_router_forward(
     hidden_states: torch.Tensor,
     input_ids: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    self = cast(Any, self)
     flat = hidden_states.reshape(-1, self.hidden_dim)
     indices = self.tid2eid[input_ids.reshape(-1)].long()
     # The token lookup fixes the experts, so only the six selected logits are

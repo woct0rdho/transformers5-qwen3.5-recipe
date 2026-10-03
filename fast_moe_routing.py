@@ -34,7 +34,7 @@ def _routing_gather_forward_launch(
     top_k: int,
     hidden_dim: int,
 ) -> tuple[int, int]:
-    """Return ``(BLOCK_H, num_warps)`` for fused route gathering."""
+    """Return `(BLOCK_H, num_warps)` for fused route gathering."""
 
     del num_tokens, top_k
     if hidden_dim >= 2048:
@@ -47,10 +47,10 @@ def _routing_combine_forward_launch(
     top_k: int,
     hidden_dim: int,
 ) -> tuple[int, int]:
-    """Return ``(BLOCK_H, num_warps)`` for fused weighted route combining.
+    """Return `(BLOCK_H, num_warps)` for fused weighted route combining.
 
-    Production workloads are Qwen ``[T, 2048]`` top-8 and DeepSeek
-    ``[T, 4096]`` top-6 for ``T = 2048, 8192, 32768``.
+    Production workloads are Qwen `[T, 2048]` top-8 and DeepSeek
+    `[T, 4096]` top-6 for `T = 2048, 8192, 32768`.
     """
 
     del top_k

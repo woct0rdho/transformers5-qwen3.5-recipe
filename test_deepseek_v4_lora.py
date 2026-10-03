@@ -101,11 +101,15 @@ def test_q8_0_ordinary_lora_uses_native_base_and_fused_residual() -> None:
     )
     register_deepseek_v4_lora(config)
     model = get_peft_model(Toy(), config, autocast_adapter_dtype=False)
-    layer = model.base_model.model.q_a_proj
+    wrapped = model.base_model.model
+    assert isinstance(wrapped, Toy)
+    layer = wrapped.q_a_proj
     assert isinstance(layer, DeepseekV4GgufLoraLinear)
+    lora_b = layer.lora_B["default"]
+    assert isinstance(lora_b, torch.nn.Linear)
 
     with torch.no_grad():
-        layer.lora_B["default"].weight.normal_(std=0.02)
+        lora_b.weight.normal_(std=0.02)
     x = torch.randn(2048, 4096, device="cuda", dtype=torch.bfloat16, requires_grad=True)
     recorder = _RecordOps()
     with recorder:

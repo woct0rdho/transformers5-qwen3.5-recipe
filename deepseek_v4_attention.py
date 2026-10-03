@@ -59,14 +59,14 @@ def _canonical_training_mask(
 
     No family-owned kernel reads a mask value: sliding attention ignores its mask
     argument, and the compressed families only check this view's shape. Building
-    a real ``[1, 1, S, S]`` mask therefore costs an allocation and a device
+    a real `[1, 1, S, S]` mask therefore costs an allocation and a device
     synchronization per step - transformers' eager mask creates its zero scalar
     on the device - to produce data nothing consumes. The canonical object is
     instead one poisoned element broadcast to the expected shape, so the
     metadata stays checkable while an accidental future read yields NaN instead
     of a mask that silently looks plausible.
 
-    ``mask_function`` and the interface keyword arguments are accepted and
+    `mask_function` and the interface keyword arguments are accepted and
     unused. The remaining checks still reject padding, cache offsets, and any
     batch or sequence length the fixed-shape kernels do not support.
     """

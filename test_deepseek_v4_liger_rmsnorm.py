@@ -3,6 +3,7 @@ from typing import Any, cast
 import pytest
 import torch
 from peft import LoraConfig, get_peft_model
+from peft.tuners.lora.layer import LoraLayer
 from transformers.models.deepseek_v4.modeling_deepseek_v4 import (
     DeepseekV4RMSNorm,
     DeepseekV4UnweightedRMSNorm,
@@ -176,6 +177,10 @@ def test_frozen_weight_function_returns_no_weight_gradient() -> None:
 
 def test_base_model_patch_survives_lora_injection() -> None:
     class Toy(torch.nn.Module):
+        # `q_a_proj` is a LoRA layer once PEFT has injected the adapter, so the test only needs the
+        # module surface here. `LoraLayer` below narrows it back to the adapter.
+        q_a_proj: torch.nn.Module
+
         def __init__(self) -> None:
             super().__init__()
             self.q_a_proj = torch.nn.Linear(512, 512, bias=False)
@@ -198,9 +203,14 @@ def test_base_model_patch_survives_lora_injection() -> None:
     model(x).float().square().mean().backward()
 
     patched_base = model.base_model.model
+    assert isinstance(patched_base, Toy)
     assert getattr(patched_base.norm, PATCH_MARKER)
     assert patched_base.norm.weight.grad is None
-    assert patched_base.q_a_proj.lora_B["default"].weight.grad is not None
+    q_a_proj = patched_base.q_a_proj
+    assert isinstance(q_a_proj, LoraLayer)
+    lora_b = q_a_proj.lora_B["default"]
+    assert isinstance(lora_b, torch.nn.Linear)
+    assert lora_b.weight.grad is not None
 
 
 def test_configuration_freezes_norm_weights_and_is_idempotent() -> None:

@@ -3,7 +3,7 @@
 These tests are CPU-only and stub the packed calculation. They pin the
 fail-closed rules that both model forwards rely on: training with labels uses
 the packed loss without retained logits, a packed step rejects
-``logits_to_keep``, and evaluation keeps the ordinary materialized-logits loss.
+`logits_to_keep`, and evaluation keeps the ordinary materialized-logits loss.
 """
 
 from collections.abc import Callable

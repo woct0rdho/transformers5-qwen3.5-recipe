@@ -1,7 +1,6 @@
 import os
 from pathlib import Path
 from types import SimpleNamespace
-from typing import cast
 
 import gguf
 import numpy as np
@@ -97,8 +96,8 @@ def test_deepseek_prior_binding_follows_each_moe_router() -> None:
     counts = _bind_deepseek_expert_priors(model, "deepseek-learned")
 
     assert counts == {"deepseek-learned": 1, "deepseek-hash": 1}
-    first_experts = cast(torch.nn.Module, model.layers[0].experts)
-    second_experts = cast(torch.nn.Module, model.layers[1].experts)
+    first_experts = model.layers[0].experts
+    second_experts = model.layers[1].experts
     assert first_experts.__dict__["_aiter_expert_prior"] == "deepseek-hash"
     assert second_experts.__dict__["_aiter_expert_prior"] == "deepseek-learned"
 

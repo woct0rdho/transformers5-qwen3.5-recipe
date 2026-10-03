@@ -67,14 +67,20 @@ def test_fast_lora_keeps_original_bf16_input_and_exact_base_jacobian() -> None:
     toy = Toy()
     register_fast_lora(config, toy)
     model = get_peft_model(toy, config, autocast_adapter_dtype=False)
-    layer = model.base_model.model.proj
+    wrapped = model.base_model.model
+    assert isinstance(wrapped, Toy)
+    layer = wrapped.proj
     assert isinstance(layer, FastGgufLoraLinear)
-    assert layer.lora_A["default"].weight.dtype == torch.bfloat16
-    assert layer.lora_B["default"].weight.dtype == torch.bfloat16
+    lora_a = layer.lora_A["default"]
+    lora_b = layer.lora_B["default"]
+    assert isinstance(lora_a, torch.nn.Linear)
+    assert isinstance(lora_b, torch.nn.Linear)
+    assert lora_a.weight.dtype == torch.bfloat16
+    assert lora_b.weight.dtype == torch.bfloat16
 
     generator = torch.Generator(device="cuda").manual_seed(2468)
     with torch.no_grad():
-        layer.lora_B["default"].weight.normal_(generator=generator, std=0.02)
+        lora_b.weight.normal_(generator=generator, std=0.02)
     input = torch.randn(
         1,
         2048,
@@ -106,8 +112,8 @@ def test_fast_lora_keeps_original_bf16_input_and_exact_base_jacobian() -> None:
     assert "torch_ggml_ops._mmq_launch.default" in dispatched_ops
     assert "torch_ggml_ops._mmq_grad_input_launch.default" in dispatched_ops
     actual_input_grad = require_grad(input).detach().clone()
-    actual_a_grad = require_grad(layer.lora_A["default"].weight).detach().clone()
-    actual_b_grad = require_grad(layer.lora_B["default"].weight).detach().clone()
+    actual_a_grad = require_grad(lora_a.weight).detach().clone()
+    actual_b_grad = require_grad(lora_b.weight).detach().clone()
 
     logical_weight = dequantize_gguf_tensor(
         payload,
@@ -116,8 +122,8 @@ def test_fast_lora_keeps_original_bf16_input_and_exact_base_jacobian() -> None:
         device="cuda",
     ).reshape(out_features, 2048)
     input_ref = input.detach().clone().requires_grad_(True)
-    a_ref = layer.lora_A["default"].weight.detach().clone().requires_grad_(True)
-    b_ref = layer.lora_B["default"].weight.detach().clone().requires_grad_(True)
+    a_ref = lora_a.weight.detach().clone().requires_grad_(True)
+    b_ref = lora_b.weight.detach().clone().requires_grad_(True)
     base_ref = torch.nn.functional.linear(input_ref, logical_weight)
     hidden_ref = torch.matmul(input_ref, a_ref.transpose(0, 1))
     output_ref = torch.addmm(
@@ -203,13 +209,19 @@ def test_fast_lora_gdn_projection_uses_generic_dequant_forward() -> None:
     toy = Toy()
     register_fast_lora(config, toy)
     model = get_peft_model(toy, config, autocast_adapter_dtype=False)
-    layer = model.base_model.model.linear_attn.in_proj_z
+    wrapped = model.base_model.model
+    assert isinstance(wrapped, Toy)
+    layer = wrapped.linear_attn.in_proj_z
     assert isinstance(layer, FastGgufLoraLinear)
     assert layer.uses_packed_mmq() is False
+    lora_a = layer.lora_A["default"]
+    lora_b = layer.lora_B["default"]
+    assert isinstance(lora_a, torch.nn.Linear)
+    assert isinstance(lora_b, torch.nn.Linear)
 
     generator = torch.Generator(device="cuda").manual_seed(9753)
     with torch.no_grad():
-        layer.lora_B["default"].weight.normal_(generator=generator, std=0.02)
+        lora_b.weight.normal_(generator=generator, std=0.02)
     input = torch.randn(
         1,
         2048,
@@ -248,8 +260,8 @@ def test_fast_lora_gdn_projection_uses_generic_dequant_forward() -> None:
         device="cuda",
     ).reshape(out_features, 2048)
     input_ref = input.detach().clone().requires_grad_(True)
-    a_ref = layer.lora_A["default"].weight.detach().clone().requires_grad_(True)
-    b_ref = layer.lora_B["default"].weight.detach().clone().requires_grad_(True)
+    a_ref = lora_a.weight.detach().clone().requires_grad_(True)
+    b_ref = lora_b.weight.detach().clone().requires_grad_(True)
     base_ref = torch.nn.functional.linear(input_ref, logical_weight)
     hidden_ref = torch.matmul(input_ref, a_ref.transpose(0, 1))
     output_ref = torch.addmm(
@@ -266,13 +278,13 @@ def test_fast_lora_gdn_projection_uses_generic_dequant_forward() -> None:
         require_grad(input), require_grad(input_ref), rtol=0, atol=8e-3
     )
     torch.testing.assert_close(
-        require_grad(layer.lora_A["default"].weight),
+        require_grad(lora_a.weight),
         require_grad(a_ref),
         rtol=0,
         atol=0,
     )
     torch.testing.assert_close(
-        require_grad(layer.lora_B["default"].weight),
+        require_grad(lora_b.weight),
         require_grad(b_ref),
         rtol=0,
         atol=0,

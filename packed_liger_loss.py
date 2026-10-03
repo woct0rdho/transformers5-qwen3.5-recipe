@@ -91,8 +91,8 @@ def scale_input_gradient_in_place(
 ) -> None:
     """Multiply a retained hidden-state gradient by the scalar loss gradient.
 
-    Liger's ``fused_linear_cross_entropy_backward`` opens with
-    ``torch.equal(grad_output, torch.tensor(1.0, ...))``, which synchronizes the
+    Liger's `fused_linear_cross_entropy_backward` opens with
+    `torch.equal(grad_output, torch.tensor(1.0, ...))`, which synchronizes the
     device on every step. That test only decides whether this multiply can be
     skipped, so running it unconditionally is cheaper than the stall.
     """
@@ -351,13 +351,13 @@ def packed_q8_liger_for_causal_lm_loss(
 ) -> PackedLossResult:
     """Run the packed head under one model's validated contract.
 
-    ``chunk_size``, ``expected_quant_type``/``quant_name``,
-    ``expected_hidden_size``, and the ``loss_name`` used in errors are the only
+    `chunk_size`, `expected_quant_type`/`quant_name`,
+    `expected_hidden_size`, and the `loss_name` used in errors are the only
     model-owned parameters. The calculation is identical for every caller.
     """
 
-    label_smoothing = cast(float, kwargs.get("label_smoothing", 0.0))
-    lse_square_scale = cast(float, kwargs.get("lse_square_scale", 0.0))
+    label_smoothing = kwargs.get("label_smoothing", 0.0)
+    lse_square_scale = kwargs.get("lse_square_scale", 0.0)
     unsupported = (
         ("z-loss output", bool(kwargs.get("return_z_loss", False))),
         ("token scaling", bool(kwargs.get("use_token_scaling", False))),
@@ -449,7 +449,7 @@ def scoped_packed_causal_lm_loss(
     packed_loss: Callable[..., PackedLossResult],
     loss_kwargs: dict[str, object],
 ) -> ScopedLossResult:
-    """Return ``(loss, logits, token_accuracy, predicted_tokens)``.
+    """Return `(loss, logits, token_accuracy, predicted_tokens)`.
 
     Both model forwards share this decision so the packed boundary fails closed
     identically: training with labels must use the packed loss, a packed step
@@ -524,8 +524,8 @@ def assembled_scoped_output(
 ) -> LigerMoeCausalLMOutputWithPast:
     """Assemble the shared public output so the optional fields cannot drift.
 
-    Both model forwards return ``LigerMoeCausalLMOutputWithPast`` through this
-    boundary, so ``token_accuracy`` and ``predicted_tokens`` are surfaced
+    Both model forwards return `LigerMoeCausalLMOutputWithPast` through this
+    boundary, so `token_accuracy` and `predicted_tokens` are surfaced
     whenever the caller requested them instead of being computed and dropped by
     one model.
     """

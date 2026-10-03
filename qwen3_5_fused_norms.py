@@ -8,10 +8,10 @@ installs both kernels here instead, on the module instances, so the exact config
 to the audit and to the trainer.
 
 Semantics preserved:
-* `Qwen3_5MoeRMSNorm` computes `x_norm * (1 + weight)` in FP32 and returns the input dtype.
+- `Qwen3_5MoeRMSNorm` computes `x_norm * (1 + weight)` in FP32 and returns the input dtype.
   Liger's contract for that is `offset=1.0`, `casting_mode="gemma"`. `in_place=False` keeps the
   residual stream readable after the norm.
-* `Qwen3_5MoeRMSNormGated` computes `weight * x_norm * silu(gate)` in FP32. FLA's contract for
+- `Qwen3_5MoeRMSNormGated` computes `weight * x_norm * silu(gate)` in FP32. FLA's contract for
   that is `FusedRMSNormGated`, i.e. `LayerNormGatedFunction` with `is_rms_norm=True`.
 
 The patched module classes, parameter names, shapes, and dtypes are unchanged, so PEFT

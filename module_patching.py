@@ -4,16 +4,15 @@
 `fast_moe_ranking.py` install a replacement forward on selected module instances and then gate the
 run on a fixed inventory. They need the same protocol, so it lives here and each family module only
 supplies what is actually family-specific:
-
-* match modules by type, in `named_modules()` order;
-* count every match, patched or not, so the inventory gate sees the whole model;
-* validate the site (device, dtype, geometry) before touching it, and prepare it if needed;
-* optionally freeze the replaced weight, which sits outside the fixed LoRA target contract;
-* set a marker attribute and, when a forward is supplied, replace `forward` with `MethodType`, so
+- match modules by type, in `named_modules()` order;
+- count every match, patched or not, so the inventory gate sees the whole model;
+- validate the site (device, dtype, geometry) before touching it, and prepare it if needed;
+- optionally freeze the replaced weight, which sits outside the fixed LoRA target contract;
+- set a marker attribute and, when a forward is supplied, replace `forward` with `MethodType`, so
   a second call only counts;
-* report the inventory counters, per-family names, `patched`, `already_patched`, and
+- report the inventory counters, per-family names, `patched`, `already_patched`, and
   `patched_names`;
-* fail closed through `require_complete_inventory` when the inventory is not exactly covered.
+- fail closed through `require_complete_inventory` when the inventory is not exactly covered.
 
 Only the forward, the site hooks, and the skip rule are per-family. `matches` selects which
 modules of `module_type` a spec owns, which lets several specs share one module class and route by

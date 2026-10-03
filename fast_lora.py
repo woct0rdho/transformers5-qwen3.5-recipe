@@ -1,14 +1,14 @@
 """PEFT-native fast LoRA wrappers for ordinary linear layers.
 
 The optimized path fuses the second LoRA matrix multiplication with the
-addition to the frozen base-layer result via ``torch.addmm``. This avoids
-materializing a full-size ``lora_B(lora_A(x))`` output before adding it to the
+addition to the frozen base-layer result via `torch.addmm`. This avoids
+materializing a full-size `lora_B(lora_A(x))` output before adding it to the
 base result. Unsupported PEFT modes fall back to PEFT's original forwards.
 
 Registration uses PEFT's experimental custom-module API instead of changing
 installed PEFT classes globally. Persistent GGUF modules remain frozen and
 cannot merge adapter deltas into their packed physical weights. MoE adapters
-are handled separately by ``fast_moe_lora.py``.
+are handled separately by `fast_moe_lora.py`.
 """
 
 from typing import Any
@@ -50,9 +50,9 @@ def _fused_lora_add(
     dropout: torch.nn.Module,
     scaling: float,
 ) -> torch.Tensor:
-    """Return ``result + scaling * lora_B(lora_A(dropout(x)))``.
+    """Return `result + scaling * lora_B(lora_A(dropout(x)))`.
 
-    ``torch.addmm`` uses the base result as its matrix input, so the final LoRA
+    `torch.addmm` uses the base result as its matrix input, so the final LoRA
     projection and residual addition produce one full-size output rather than
     separate LoRA-output and summed-output tensors.
     """
@@ -136,12 +136,12 @@ class FastLoraLinear(_FastLoraForwardMixin, PeftLinear):
 
 
 class FastGgufLoraLinear(FastLoraLinear):
-    """Fast LoRA wrapper for frozen packed ``GgufLinear`` modules.
+    """Fast LoRA wrapper for frozen packed `GgufLinear` modules.
 
     Permutation-free packed weights of ordinary projections use exported dense MMQ in both
     directions. Fused recurrent projections and modules with a runtime layout permutation use
     the generic compiled-dequant base forward. Kernel support is authoritative in
-    ``torch-ggml-ops`` and is not probed here.
+    `torch-ggml-ops` and is not probed here.
     """
 
     def packed_mmq_weight(self) -> GgufQuantizedParameter | None:
@@ -201,13 +201,13 @@ class FastGgufLoraLinear(FastLoraLinear):
 
 
 def register_fast_lora(lora_config: LoraConfig, model: torch.nn.Module) -> LoraConfig:
-    """Register fast ordinary-linear wrappers on one ``LoraConfig``.
+    """Register fast ordinary-linear wrappers on one `LoraConfig`.
 
     PEFT currently exposes custom LoRA modules through the experimental private
-    ``LoraConfig._register_custom_module`` API. Registration is config-local:
+    `LoraConfig._register_custom_module` API. Registration is config-local:
     no PEFT or Transformers class is monkey-patched process-wide.
 
-    ``model`` is marked for the projections that must keep the generic packed
+    `model` is marked for the projections that must keep the generic packed
     base forward. The wrapper reads that mark when it picks its path.
     """
 

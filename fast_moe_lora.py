@@ -1,20 +1,20 @@
 """Fast persistent-GGUF MoE LoRA with packed MMQ and AITER.
 
 The backend is shared by Qwen3.5-MoE and DeepSeek V4. Model-specific behavior
-stays in the owning experts class (``_prepare_expert_hidden_states`` and
-``_apply_split_gate``) and in each model's wrapper/registration module.
+stays in the owning experts class (`_prepare_expert_hidden_states` and
+`_apply_split_gate`) and in each model's wrapper/registration module.
 
 Packed expert forward projections run directly through grouped gfx1151 MMQ.
 Gate and up share one dynamic Q8_1 activation workspace. Frozen base input
 gradients decode active packed experts directly into BF16 WMMA fragments.
 Gate and up accumulate into one FP32 route-gradient accumulator. Rank-small
-LoRA branches retain AITER ``gmm`` and factor gradients retain AITER ``ptgmm``.
+LoRA branches retain AITER `gmm` and factor gradients retain AITER `ptgmm`.
 The gate/up factor rebuilds its routed rows from the routing index in backward
 instead of retaining the gathered activation.
 No logical base matrix, full expert LoRA delta, or effective expert-weight
 gradient is constructed.
 
-PEFT targets each complete ``GgufExperts`` module rather than its packed
+PEFT targets each complete `GgufExperts` module rather than its packed
 physical parameters. One wrapper owns the combined gate/up and down factors,
 which keeps the combined gate/up LoRA semantics while avoiding nested
 parameter wrappers and transient state on the expert module.
@@ -110,13 +110,13 @@ def _aiter_weight_grad(
 
 
 class _AiterGroupedMM(torch.autograd.Function):
-    """Autograd-capable ``(M,K) @ (E,K,N)`` grouped matrix multiplication.
+    """Autograd-capable `(M,K) @ (E,K,N)` grouped matrix multiplication.
 
-    ``lhs`` may be rebuilt instead of retained. When ``lhs_source`` and
-    ``lhs_permutation`` are supplied they satisfy
-    ``lhs == lhs_source[lhs_permutation // lhs_top_k]``, so the source rows plus
+    `lhs` may be rebuilt instead of retained. When `lhs_source` and
+    `lhs_permutation` are supplied they satisfy
+    `lhs == lhs_source[lhs_permutation // lhs_top_k]`, so the source rows plus
     the index are saved and the gather is replayed in backward. Routing repeats
-    every token ``top_k`` times, which makes the gathered activation several
+    every token `top_k` times, which makes the gathered activation several
     times larger than the token rows it copies. The replay is bitwise identical.
     """
 
@@ -240,7 +240,7 @@ def aiter_grouped_mm(
 ) -> torch.Tensor:
     """Apply the autograd-capable AITER grouped matrix multiplication.
 
-    ``lhs_source``/``lhs_permutation``/``lhs_top_k`` optionally describe ``lhs``
+    `lhs_source`/`lhs_permutation`/`lhs_top_k` optionally describe `lhs`
     as a routed row gather, so backward replays the gather instead of holding it.
     """
 
@@ -410,7 +410,7 @@ def _prepare_packed_expert_execution(
 
 
 class FastGgufMoeLora(torch.nn.Module, LoraLayer):
-    """PEFT LoRA wrapper owning all factors for one packed ``GgufExperts`` module."""
+    """PEFT LoRA wrapper owning all factors for one packed `GgufExperts` module."""
 
     adapter_layer_names = ("lora_A", "lora_B", "lora_A_down", "lora_B_down")
 
@@ -601,8 +601,8 @@ def _lora_grouped_linear(
 ) -> torch.Tensor:
     """Run both rank-small factors over the routed rows.
 
-    ``gather_source``/``gather_permutation``/``gather_top_k`` describe
-    ``hidden_states`` as routed rows of the token activations, which lets the
+    `gather_source`/`gather_permutation`/`gather_top_k` describe
+    `hidden_states` as routed rows of the token activations, which lets the
     first factor rebuild them in backward instead of retaining the gather.
     """
 

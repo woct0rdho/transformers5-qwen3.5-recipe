@@ -1,7 +1,7 @@
 """Packed GGUF-aware Liger-style cross-entropy for Qwen3.5-MoE.
 
 The frozen LM head remains in its authoritative GGUF representation. The shared
-``packed_liger_loss`` module owns the chunked Q8_1 MMQ, the in-place Liger
+`packed_liger_loss` module owns the chunked Q8_1 MMQ, the in-place Liger
 cross-entropy, the packed logical input Jacobian, and the scoped-forward
 contract. This module owns the Qwen entry points and its validated constants
 (hidden size 2048, Q6_K head, 256-row chunks).

@@ -1,19 +1,23 @@
 #!/usr/bin/env python3
 """DeepSeek V4 full-step correctness, memory, gradient, and profiling audit."""
 
+import os
+
+os.environ["HF_HUB_OFFLINE"] = "1"
+os.environ["TRANSFORMERS_OFFLINE"] = "1"
+
 import argparse
 import gc
 import json
-import os
-from collections.abc import Callable
+import re
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import bitsandbytes as bnb
 import torch
 from datasets import Dataset, load_from_disk
 from peft import LoraConfig, TaskType, get_peft_model
-from transformers import AutoModelForCausalLM
+from transformers import AutoModelForCausalLM, PreTrainedModel
 from transformers.integrations.gguf.gguf_quantized_parameter import (
     GgufQuantizedParameter,
 )
@@ -68,6 +72,11 @@ EXPECTED_GROUPED_LINEARS = 43
 EXPECTED_EXPERT_MODULES = 43
 EXPECTED_INTEGER_BUFFERS = 3
 
+# llama.cpp creates the vision-token routing bias with `TENSOR_NOT_REQUIRED` and only substitutes it
+# for `exp_probs_b` when the batch carries mtmd image embeddings (`src/models/deepseek4.cpp`), so a
+# text-only run legitimately leaves it unused. The `-Vision-Exp` checkpoint carries one per layer.
+VISION_ONLY_KEY = re.compile(r"^model\.layers\.\d+\.exp_probs_b_vl\.bias$")
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -121,9 +130,21 @@ def audit_loaded_model(
     )
     cleaned = clean_loading_info(loading_info)
     errors = []
-    for key in ("missing_keys", "unexpected_keys", "mismatched_keys", "error_msgs"):
+    for key in ("missing_keys", "mismatched_keys", "error_msgs"):
         if loading_info.get(key):
             errors.append(f"{key}={loading_info[key]}")
+    ignored_vision_keys = sorted(
+        key
+        for key in loading_info.get("unexpected_keys", ())
+        if VISION_ONLY_KEY.match(key)
+    )
+    unexpected_keys = sorted(
+        key
+        for key in loading_info.get("unexpected_keys", ())
+        if not VISION_ONLY_KEY.match(key)
+    )
+    if unexpected_keys:
+        errors.append(f"unexpected_keys={unexpected_keys}")
     observed = {
         "state_tensors": len(model.state_dict()),
         "packed_parameters": len(packed),
@@ -155,11 +176,11 @@ def audit_loaded_model(
         errors.append(f"model tensors outside cuda:0: {non_cuda[:8]}")
     if errors:
         raise RuntimeError("DeepSeek V4 load audit failed: " + "; ".join(errors))
-    get_memory_footprint = cast(
-        Callable[[], int], cast(Any, model).get_memory_footprint
-    )
+    assert isinstance(model, PreTrainedModel)
+    get_memory_footprint = model.get_memory_footprint
     return observed | {
         "loading_info": cleaned,
+        "ignored_vision_keys": len(ignored_vision_keys),
         "model_footprint_bytes": get_memory_footprint(),
         "integer_buffer_paths": [name for name, _ in integer_buffers],
     }

@@ -3,7 +3,7 @@
 Weighted DeepSeek norms have frozen FP32 scale vectors. Liger's RMSNorm
 forward remains the compute path. This module supplies an in-place backward
 that computes only the activation gradient because the scale is frozen. Q-B's
-scale-free norm uses stock Liger with ``W=None``, which already has no
+scale-free norm uses stock Liger with `W=None`, which already has no
 weight-gradient work.
 
 Width-128 weighted norms use a narrow-geometry launch specialization. The
@@ -56,7 +56,7 @@ def _frozen_weight_rms_norm_backward_kernel(
     rows_per_program,
     BLOCK_SIZE: tl.constexpr,
 ):
-    """Liger weighted RMSNorm activation gradient without ``dW``."""
+    """Liger weighted RMSNorm activation gradient without `dW`."""
 
     row_block_id = tl.program_id(0).to(tl.int64)
     row_start = row_block_id * rows_per_program

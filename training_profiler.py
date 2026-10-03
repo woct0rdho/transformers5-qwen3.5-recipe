@@ -25,17 +25,16 @@ def lora_module_category(
 
     Qwen3.5-MoE and DeepSeek V4 profiles use the same category vocabulary and
     the same precedence so their reports stay comparable:
-
-    * the routed-expert wrapper owns ``routed_experts``;
-    * a shared-expert projection owns ``shared_expert`` regardless of which
+    - the routed-expert wrapper owns `routed_experts`;
+    - a shared-expert projection owns `shared_expert` regardless of which
       ordinary wrapper class PEFT selected for it;
-    * the remaining ordinary wrappers split into ``packed_ordinary_lora`` for
-      the native packed-base path and ``ordinary_lora`` for the generic path;
-    * the frozen LM head is ``packed_lm_head``.
+    - the remaining ordinary wrappers split into `packed_ordinary_lora` for
+      the native packed-base path and `ordinary_lora` for the generic path;
+    - the frozen LM head is `packed_lm_head`.
 
     Only the architecture-owned class names and role fragments are supplied by
-    the caller. ``role_fragments`` is applied in order, so an architecture can
-    add a name-owned role such as DeepSeek's ``o_b_proj`` without redefining
+    the caller. `role_fragments` is applied in order, so an architecture can
+    add a name-owned role such as DeepSeek's `o_b_proj` without redefining
     the shared precedence in its own categorizer.
     """
 
