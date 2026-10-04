@@ -74,7 +74,7 @@ def main():
     model = AutoModelForCausalLM.from_pretrained(
         model_dir,
         gguf_file=gguf_file,
-        gguf_mmap_policy="release",
+        gguf_mmap_policy="pread",
         local_files_only=True,
         dtype=torch.bfloat16,
         attn_implementation="flash_attention_2",

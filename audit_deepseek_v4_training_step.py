@@ -270,7 +270,7 @@ def main() -> None:
         return AutoModelForCausalLM.from_pretrained(
             args.model_dir,
             gguf_file=args.gguf_file,
-            gguf_mmap_policy="release",
+            gguf_mmap_policy="pread",
             local_files_only=True,
             dtype=torch.bfloat16,
             device_map={"": "cuda:0"},
