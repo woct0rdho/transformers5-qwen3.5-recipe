@@ -23,6 +23,12 @@ _MODEL = Path(
         os.path.expanduser("~/models/qwen3.6/Qwen3.6-35B-A3B-APEX-I-Mini.gguf"),
     )
 )
+_QWEN4_MODEL = Path(
+    os.environ.get(
+        "GGUF_MMQ_TEST_QWEN4_MODEL",
+        os.path.expanduser("~/models/qwen4/Qwen3.8-Flash-Next-GSQ-RCO-Q2_0.gguf"),
+    )
+)
 
 
 def test_fast_lora_keeps_original_bf16_input_and_exact_base_jacobian() -> None:
@@ -157,39 +163,61 @@ def test_fast_lora_keeps_original_bf16_input_and_exact_base_jacobian() -> None:
     torch.testing.assert_close(actual, expected_actual, rtol=0, atol=0)
 
 
-def test_fast_lora_gdn_projection_uses_generic_dequant_forward() -> None:
-    if not _MODEL.is_file():
+@pytest.mark.parametrize(
+    ("model_path", "leaf", "tensor_name"),
+    [
+        (_MODEL, "in_proj_qkv", "blk.0.attn_qkv.weight"),
+        (_MODEL, "in_proj_z", "blk.0.attn_gate.weight"),
+        (_MODEL, "out_proj", "blk.4.ssm_out.weight"),
+        (_QWEN4_MODEL, "in_proj_qkv", "blk.0.attn_qkv.weight"),
+        (_QWEN4_MODEL, "in_proj_z", "blk.0.attn_gate.weight"),
+        (_QWEN4_MODEL, "out_proj", "blk.6.ssm_out.weight"),
+    ],
+    ids=[
+        "qwen3.5-in_proj_qkv",
+        "qwen3.5-in_proj_z",
+        "qwen3.5-out_proj",
+        "qwen4-in_proj_qkv",
+        "qwen4-in_proj_z",
+        "qwen4-out_proj",
+    ],
+)
+def test_fast_lora_gdn_projections_take_the_native_base(
+    model_path: Path, leaf: str, tensor_name: str
+) -> None:
+    """Every recurrent projection runs the deployed MMQ keys in both directions at M=2048."""
+
+    if not model_path.is_file():
         pytest.skip("GGUF model is unavailable")
 
-    reader = gguf.GGUFReader(_MODEL)
-    tensor = next(t for t in reader.tensors if t.name == "blk.0.attn_gate.weight")
-    out_features = 512
+    reader = gguf.GGUFReader(model_path)
+    tensor = next(t for t in reader.tensors if t.name == tensor_name)
+    in_features, out_features = int(tensor.shape[0]), int(tensor.shape[1])
     payload = torch.from_numpy(
-        np.array(tensor.data[:out_features], dtype=np.uint8, copy=True, order="C")
+        np.array(tensor.data, dtype=np.uint8, copy=True, order="C")
     ).to("cuda")
     packed = GgufQuantizedParameter(
         payload,
         quant_type=tensor.tensor_type,
-        logical_shape=(out_features, 2048),
+        logical_shape=(out_features, in_features),
     )
 
     class LinearAttention(torch.nn.Module):
-        # Named like the GatedDeltaNet projections that must stay on the generic packed
-        # base forward, whose packed row reorder leaves no runtime permutation.
         def __init__(self) -> None:
             super().__init__()
-            self.in_proj_z = GgufLinear(
-                2048,
+            module = GgufLinear(
+                in_features,
                 out_features,
                 bias=False,
                 device="cuda",
                 dtype=torch.bfloat16,
                 compute_dtype=torch.bfloat16,
             )
-            self.in_proj_z.weight = packed
+            module.weight = packed
+            setattr(self, leaf, module)
 
         def forward(self, input: torch.Tensor) -> torch.Tensor:
-            return self.in_proj_z(input)
+            return getattr(self, leaf)(input)
 
     class Toy(torch.nn.Module):
         def __init__(self) -> None:
@@ -200,7 +228,7 @@ def test_fast_lora_gdn_projection_uses_generic_dequant_forward() -> None:
             return self.linear_attn(input)
 
     config = LoraConfig(
-        target_modules=["in_proj_z"],
+        target_modules=[leaf],
         r=4,
         lora_alpha=4,
         lora_dropout=0.0,
@@ -211,21 +239,19 @@ def test_fast_lora_gdn_projection_uses_generic_dequant_forward() -> None:
     model = get_peft_model(toy, config, autocast_adapter_dtype=False)
     wrapped = model.base_model.model
     assert isinstance(wrapped, Toy)
-    layer = wrapped.linear_attn.in_proj_z
+    layer = getattr(wrapped.linear_attn, leaf)
     assert isinstance(layer, FastGgufLoraLinear)
-    assert layer.uses_packed_mmq() is False
+    assert layer.uses_packed_mmq() is True
     lora_a = layer.lora_A["default"]
     lora_b = layer.lora_B["default"]
-    assert isinstance(lora_a, torch.nn.Linear)
-    assert isinstance(lora_b, torch.nn.Linear)
 
-    generator = torch.Generator(device="cuda").manual_seed(9753)
+    generator = torch.Generator(device="cuda").manual_seed(3184)
     with torch.no_grad():
         lora_b.weight.normal_(generator=generator, std=0.02)
     input = torch.randn(
         1,
         2048,
-        2048,
+        in_features,
         generator=generator,
         device="cuda",
         dtype=torch.bfloat16,
@@ -250,15 +276,17 @@ def test_fast_lora_gdn_projection_uses_generic_dequant_forward() -> None:
     with _RecordOps():
         actual = model(input)
         actual.backward(grad_output)
-    assert "torch_ggml_ops._mmq_launch.default" not in dispatched_ops
-    assert "torch_ggml_ops._mmq_grad_input_launch.default" not in dispatched_ops
+    assert "torch_ggml_ops._mmq_launch.default" in dispatched_ops
+    assert "torch_ggml_ops._mmq_grad_input_launch.default" in dispatched_ops
 
+    # The native base and the dequantize-and-multiply base differ in accumulation order, so the
+    # comparison is a tolerance on the whole tensor rather than bitwise equality.
     logical_weight = dequantize_gguf_tensor(
         payload,
         tensor.tensor_type,
         dtype=torch.bfloat16,
         device="cuda",
-    ).reshape(out_features, 2048)
+    ).reshape(out_features, in_features)
     input_ref = input.detach().clone().requires_grad_(True)
     a_ref = lora_a.weight.detach().clone().requires_grad_(True)
     b_ref = lora_b.weight.detach().clone().requires_grad_(True)
@@ -273,20 +301,13 @@ def test_fast_lora_gdn_projection_uses_generic_dequant_forward() -> None:
     ).reshape_as(actual)
     output_ref.backward(grad_output)
 
-    torch.testing.assert_close(actual, output_ref, rtol=0, atol=0)
-    torch.testing.assert_close(
-        require_grad(input), require_grad(input_ref), rtol=0, atol=8e-3
-    )
-    torch.testing.assert_close(
-        require_grad(lora_a.weight),
-        require_grad(a_ref),
-        rtol=0,
-        atol=0,
-    )
-    torch.testing.assert_close(
-        require_grad(lora_b.weight),
-        require_grad(b_ref),
-        rtol=0,
-        atol=0,
-    )
+    def relative_l2(candidate: torch.Tensor, reference: torch.Tensor) -> float:
+        candidate = candidate.detach().float()
+        reference = reference.detach().float()
+        return float((candidate - reference).norm() / reference.norm())
+
+    assert relative_l2(actual, output_ref) < 2e-2
+    assert relative_l2(require_grad(input), require_grad(input_ref)) < 2e-2
+    assert relative_l2(require_grad(lora_a.weight), require_grad(a_ref)) < 2e-2
+    assert relative_l2(require_grad(lora_b.weight), require_grad(b_ref)) < 2e-2
     assert layer.base_layer.weight.grad is None

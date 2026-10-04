@@ -1,10 +1,13 @@
 # Low-VRAM LoRA Training With GGUF Base Model
 
+Open weight AI is like open source software. Users not only run the weights, but also modify the weights. It matters to develop training framework for local hardware.
+
 GGUF is going to replace bitsandbytes as the base model format for low-VRAM LoRA training. I've tried to train, with no CPU offload:
 - Qwen3.6-35B-A3B in 16 GiB VRAM (implying it's more than enough to train Qwen3.5-122B-A10B in 64 GiB, and Qwen3.5-397B-A17B in 192 GiB)
 - DeepSeek-V4-Flash (284B-A13B) in 90 GiB VRAM
+- Qwen3.8-Flash-Next (125B-A6B + 51B engram) in 40 GiB VRAM
 
-Currently all kernels and parameters in this repo are tuned for Strix Halo. It should not be too hard to port to other GPUs.
+Currently all kernels and parameters in this repo are tuned for Strix Halo. More work is needed to support other GPUs.
 
 Things involved in the training:
 - Usual training loop with transformers 5 and PEFT
@@ -14,22 +17,28 @@ Things involved in the training:
 - Fast LoRA bwd formula like Unsloth for linear layer and MoE layer
 - AITER gmm/ptgmm Triton kernels with tuned configs for non-quantized MoE LoRA
 - MoE routing like OpenAI triton-kernels
-- AITER FlashAttention Triton kernel with tuned configs and the bugfix https://github.com/ROCm/aiter/issues/3551
 - RMSNorm from Liger Kernel
 - Chunked cross entropy loss like Liger Kernel, which works with MMQ
 - Autoregressive decoding cache and load balancing loss disabled to save VRAM
 - Non-reentrant gradient checkpointing
 - bitsandbytes AdamW 8-bit optimizer
 
-Qwen-specific:
-- Qwen3.6-35B-A3B with APEX-I-Mini quantization that only takes 13.3 GiB, see https://huggingface.co/mudler/Qwen3.6-35B-A3B-APEX-GGUF/blob/main/Qwen3.6-35B-A3B-APEX-I-Mini.gguf
-- GatedDeltaNet with FLA and causal-conv1d, which are automatically chosen by transformers if installed. I've added tuned configs but I've not yet fully considered how to optimize this
+Qwen3.5-specific:
+- APEX-I-Mini quantization that only takes 13.3 GiB, see https://huggingface.co/mudler/Qwen3.6-35B-A3B-APEX-GGUF/blob/main/Qwen3.6-35B-A3B-APEX-I-Mini.gguf
+- AITER FlashAttention Triton kernel with tuned configs and the bugfix https://github.com/ROCm/aiter/issues/3551
+- GatedDeltaNet with MMQ, FLA, causal-conv1d, and custom Triton kernels, including bwd
 
 DeepSeek-specific:
-- `IQ2_XXS` quantization, see https://huggingface.co/antirez/deepseek-v4-gguf/blob/main/DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix.gguf
-- Sliding attention, CSA, HCA, mHC with fast Triton kernels, including bwd
+- IQ2_XXS quantization that only takes 81 GiB, see https://huggingface.co/antirez/deepseek-v4-gguf/blob/main/DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix.gguf
+- Sliding attention, CSA, HCA, mHC with Triton kernels, including bwd
+
+Qwen4-Exp-specific:
+- GSQ-RCO Q2_0 quantization that only takes 35 GiB VRAM + 27 GiB engram, see https://huggingface.co/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF/tree/main/Q2_0
+- QSA with Triton kernels, including bwd
+- PLE on disk with prefetch
 
 Other notes:
 - Unsloth gradient checkpointing provides fast async CPU-GPU copy. You need it if you actually do CPU offload. But on Strix Halo with unified memory you should just use the usual gradient checkpointing
-- It does not affect loading GGUF models, but when loading safetensors models on Strix Halo, you need to patch transformers so it passes `backend="pread"` to safetensors, see https://github.com/safetensors/safetensors/pull/728
-- When directly using my forked transformers with GGUF quantizer, you may add torch.compile to the GGUF dequant function to save VRAM. This repo always use torch-ggml-ops and does not depend on the GGUF dequant function in torch
+- When loading large models on Strix Halo, you need pread, see https://github.com/safetensors/safetensors/pull/728
+- When using transformers with GGUF quantizer, you need torch.compile on the GGUF dequant function to save VRAM
+- When inferencing the model with LoRA in llama.cpp, currently llama.cpp does not have a fast LoRA kernel. I've made one, see https://github.com/woct0rdho/llama.cpp/commit/36e9f19a3058cbdc86e824293c0c69ca02ad03ea

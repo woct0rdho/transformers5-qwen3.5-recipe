@@ -1,5 +1,6 @@
 from typing import Any
 
+import pytest
 import torch
 from transformers import Trainer
 
@@ -7,15 +8,33 @@ import gguf_dequant_compile
 from bf16_adapter_trainer import BF16AdapterTrainer
 
 
-def test_compiled_dequant_patch_updates_every_runtime_binding(monkeypatch) -> None:
+@pytest.fixture
+def patch_marker_cleared():
+    """Hand the test an unpatched module and leave it that way, whatever the test does to it."""
+
+    gguf_dequant_compile.gguf_dequant.__dict__.pop(
+        gguf_dequant_compile._PATCH_MARKER, None
+    )
+    yield
+    gguf_dequant_compile.gguf_dequant.__dict__.pop(
+        gguf_dequant_compile._PATCH_MARKER, None
+    )
+
+
+def test_compiled_dequant_patch_updates_every_runtime_binding(
+    monkeypatch, patch_marker_cleared
+) -> None:
     modules = (
         gguf_dequant_compile.gguf_dequant,
         gguf_dequant_compile.gguf_quantized_parameter,
         gguf_dequant_compile.gguf_kernels,
     )
     originals = {module: module.dequantize for module in modules}
-    marker = gguf_dequant_compile._PATCH_MARKER
-    old_limit = torch._dynamo.config.recompile_limit
+    for module, original in originals.items():
+        monkeypatch.setitem(module.__dict__, "dequantize", original)
+    monkeypatch.setattr(
+        torch._dynamo.config, "recompile_limit", torch._dynamo.config.recompile_limit
+    )
     compile_calls: list[tuple[Any, dict[str, Any]]] = []
 
     def fake_compile(function: Any, **kwargs: Any) -> Any:
@@ -27,28 +46,21 @@ def test_compiled_dequant_patch_updates_every_runtime_binding(monkeypatch) -> No
         return compiled
 
     monkeypatch.setattr(torch, "compile", fake_compile)
-    gguf_dequant_compile.gguf_dequant.__dict__.pop(marker, None)
-    try:
-        assert gguf_dequant_compile.configure_compiled_gguf_dequantize() is True
-        assert gguf_dequant_compile.configure_compiled_gguf_dequantize() is False
-        compiled: Any = modules[0].dequantize
-        assert all(module.dequantize is compiled for module in modules)
-        assert compiled._eager_dequantize is originals[modules[0]]
-        assert compile_calls == [
-            (
-                originals[modules[0]],
-                {
-                    "fullgraph": True,
-                    "mode": "max-autotune-no-cudagraphs",
-                    "recompile_limit": 64,
-                },
-            )
-        ]
-    finally:
-        for module, original in originals.items():
-            module.__dict__["dequantize"] = original
-        gguf_dequant_compile.gguf_dequant.__dict__.pop(marker, None)
-        torch._dynamo.config.recompile_limit = old_limit
+    assert gguf_dequant_compile.configure_compiled_gguf_dequantize() is True
+    assert gguf_dequant_compile.configure_compiled_gguf_dequantize() is False
+    compiled: Any = modules[0].dequantize
+    assert all(module.dequantize is compiled for module in modules)
+    assert compiled._eager_dequantize is originals[modules[0]]
+    assert compile_calls == [
+        (
+            originals[modules[0]],
+            {
+                "fullgraph": True,
+                "mode": "max-autotune-no-cudagraphs",
+                "recompile_limit": 64,
+            },
+        )
+    ]
 
 
 def test_checkpoint_restore_forces_bf16_adapter_load(

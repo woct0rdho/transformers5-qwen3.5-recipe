@@ -51,7 +51,7 @@ Reusable Transformers support provides:
 - Qwen3.5 recurrent input/output layout handling.
 - capability-validated private expert backend names for specialized `GgufExperts` execution: the architecture-wide registry rejects them, but the model-level check accepts a private name once every applicable expert module's own `_validate_supported_experts_implementation` validator accepts it.
 
-The ordinary, routed-expert, and LM-head paths no longer materialize logical base matrices. The remaining users of logical materialization are the 90 GatedDeltaNet projections on the generic compiled-dequant path. Their row reorder is now folded into the packed payload (`PermuteRows`/`TiledToGroupedRows` are packed-safe), so they look permutation-free at runtime. They stay generic because `torch-ggml-ops` has no exact dense deployment for `linear_attn.in_proj_z` (`N=4096`, `K=2048`, Q3_K/Q4_K) or for one Q5_K `linear_attn.in_proj_qkv`, and `linear_attn.out_proj` still consumes a runtime input permutation whose columns cross quantization blocks.
+The ordinary, routed-expert, and LM-head paths no longer materialize logical base matrices, and the 30 GatedDeltaNet output projections have left the generic compiled-dequant path as well: `gdn_tiled_value_heads.py` keeps llama.cpp's tiled value-head order through the load and through the broadcast, so `linear_attn.out_proj` consumes the packed columns in their own order, and `torch-ggml-ops` now deploys `(n=2048, k=4096)` for Q3_K in both directions, which is the key 25 of the 30 layers needed. `in_proj_a` and `in_proj_b` are the only measured projections left on the dequantize-and-multiply base, on purpose: their `[48,2048]` shape is below the granularity of a deployed key. The recurrent input and gate projections used to be held back with it because `torch-ggml-ops` had no exact dense deployment for `linear_attn.in_proj_z` (`N=4096`, `K=2048`, Q3_K/Q4_K) or for one Q5_K `linear_attn.in_proj_qkv`. Those keys exist now, their row reorder is folded into the packed payload (`PermuteRows`/`TiledToGroupedRows` are packed-safe), so they look permutation-free at runtime and run the native base.
 
 ### Ordinary packed LoRA
 
@@ -59,13 +59,13 @@ The ordinary, routed-expert, and LM-head paths no longer materialize logical bas
 
 Current model composition:
 - 250 ordinary LoRA wrappers.
-- 160 ordinary packed projections using native MMQ in forward and backward.
-- 90 GatedDeltaNet projections (`linear_attn.in_proj_qkv`, `linear_attn.in_proj_z`, `linear_attn.out_proj`) using the generic compiled-dequant base forward.
+- 220 ordinary packed projections on the native dense MMQ forward and backward (the attention/MLP projections plus the GatedDeltaNet input and gate projections).
+- 0 ordinary projections on the generic compiled-dequant base: all 250 run the native dense MMQ base in both directions.
 - 250 ordinary LoRA-A and LoRA-B factor pairs included in normal PEFT serialization.
 
-`FastGgufLoraLinear.uses_packed_mmq()` is the single source of truth for the path decision. The GatedDeltaNet projections are selected by module name because geometry alone cannot separate `linear_attn.in_proj_qkv` from `q_proj`, and those layouts are outside the dense MMQ deployment contract in `torch-ggml-ops`.
+`FastGgufLoraLinear.uses_packed_mmq()` is the single source of truth for the path decision. It refuses any module whose `GgufLinear.input_permutation` is set, which is the only remaining reason a packed projection would leave the native base. With `gdn_tiled_value_heads.py` installed the loaded model carries no permutation at all.
 
-For the 160 native projections:
+For the 220 native projections:
 - the frozen BF16 input is dynamically quantized to Q8_1.
 - `torch_ggml_ops::mmq` multiplies it by the authoritative packed GGUF weight.
 - LoRA-A runs from the original BF16 input.
@@ -231,7 +231,8 @@ The `train_qwen3_5_35b.py` driver and its `BF16AdapterTrainer` include:
 - a collator that reconstructs attention masks and `-100` labels.
 - deterministic guarded Flash Attention 2 choices for the validated geometry.
 - 17 exact FLA autotuner preloads across 13 kernels.
-- a project-local compiled GGUF dequantization fallback for operations that do not yet have layout-correct native MMQ, chiefly the 90 GatedDeltaNet projections.
+- a project-local compiled GGUF dequantization fallback for operations that do not yet have layout-correct native MMQ, chiefly the 30 GatedDeltaNet output projections.
+- the tiled value-head convention (`gdn_tiled_value_heads.py`), which keeps llama.cpp's order for the value axis so the output projection needs no input gather and can run the native base.
 - Liger and FLA fused norms on all 131 Qwen3.5-MoE norms (see Fused RMSNorm above).
 
 ### Warmed full-step runtime profile
@@ -256,6 +257,8 @@ The warmed traced update measured:
 | Total | 5.330 s | 100% |
 
 The audit process measured the same update independently at 1.433 s forward and 3.830 s backward. The instrumented deep trace measured 1.434 s and 3.822 s.
+
+After the `out_proj` round the audit measures `1.362 s` forward and `3.619 s` backward on the same batch, a `5.3%` lighter update at `4.98 s`, with all 250 ordinary wrappers on the native dense MMQ base and the losses at `3.2423` and `3.2384`.
 
 The traced times include profiler overhead and are a single warmed sample rather than a benchmark distribution. They are suitable for relative attribution because all requested kernel families were correlated to their launching operations.
 
@@ -292,7 +295,7 @@ The kernel-family totals are:
 | AITER PTGMM | 0 ms | 45.9 ms |
 | Routing/indexing | 18.4 ms | 61.9 ms |
 
-Backward-phase totals include checkpoint recomputation. The remaining leading opportunities are GatedDeltaNet/FLA backward, the generic-dequant GatedDeltaNet projections, grouped-MMQ input gradients, GEMM, and Flash Attention.
+Backward-phase totals include checkpoint recomputation. The remaining leading opportunities are GatedDeltaNet/FLA backward, grouped-MMQ input gradients, GEMM, and Flash Attention: the generic-dequant GatedDeltaNet projections left the list when `out_proj` moved onto the native base, which also moves that family's share of the forward `GEMM` row into the dense-MMQ row rather than removing the row.
 
 Profile artifacts:
 - refined report: `~/tmp/test_no_unsloth/qwen35_deep_refined.json`.
@@ -320,16 +323,15 @@ Both the live allocation and the allocator reservation stay below the 16 GiB cla
 
 ## Remaining work
 
-- Add exact dense MMQ deployments for the remaining GatedDeltaNet projections.
-  - 60 of the 90 (`linear_attn.in_proj_qkv`, `linear_attn.in_proj_z`) now carry their reorder in the packed payload and are otherwise native-MMQ-shaped. They stay on the generic compiled-dequant forward because the deployment table has no exact key for `linear_attn.in_proj_z` (`N=4096`, `K=2048`, Q3_K/Q4_K) or for one Q5_K `linear_attn.in_proj_qkv` at any trained `M`.
-  - `linear_attn.out_proj` still consumes a runtime input permutation whose columns cross quantization blocks, so it needs a permutation-aware deployment rather than a plain dense one.
-  - the generic fallback currently costs 217 ms forward and 471 ms backward per step across 1,593 correlated launches, dominated by the frozen-base input-gradient GEMM.
+- Every GatedDeltaNet projection is done: the input, gate and output projections all run the native dense MMQ base in both directions, every quant type and matrix size they carry is an exact dense deployment key, and those keys are exercised on real payloads by `test_fast_lora.py::test_fast_lora_gdn_projections_take_the_native_base`. Re-measure the family, because the 217/471 ms generic-fallback figure was measured with all 90 projections on that path.
+- `linear_attn.out_proj` is done: `(n=2048, k=4096)` for Q3_K is deployed in both directions, the input permutation is gone with the value-head convention, and the 25 Q3_K and 5 Q4_K layers run the native base.
   - keep authoritative packed values and the original BF16 LoRA input. Do not materialize logical matrices for a whole layer.
   - measure full-model runtime and memory rather than relying only on isolated projections.
 
 - Reduce GatedDeltaNet/FLA backward time.
-  - actual GatedDeltaNet-side backward is 1.550 seconds, including 1.014 seconds of FLA/recurrent kernels and 279 ms of GEMM.
-  - prioritize `chunk_gated_delta_rule_bwd_kernel_dhu` (444.5 ms across 30 launches), `chunk_bwd_kernel_dqkwg` (255.6 ms), WY preparation (163.6 ms backward and 88.0 ms forward replay), and the causal-convolution backward (128.8 ms).
+  - the same three replacements Qwen4-Exp uses are wired here as well, in `train_qwen3_5_35b.py` and `audit_qwen3_5_training_step.py`: `gdn_bwd_dhu.py` (the walk), `gdn_bwd_dqkwg.py` (the widened `dqkwg` launcher) and `gdn_wu_recompute.py` (the W/U recomputation). The geometry qualifies (16 key heads, 32 value heads, head and value dim 128, conv kernel 4), and `plan_qwen4_exp_gdn_forward.md` and `plan_qwen4_exp_gdn_backward.md` own their measured effects, but this model has not been re-measured with them, so every number in this bullet and in the kernel-family totals above is the pre-replacement one.
+  - re-measure the family first: actual GatedDeltaNet-side backward was 1.550 seconds, including 1.014 seconds of FLA/recurrent kernels and 279 ms of GEMM.
+  - what is left after the replacements: WY preparation (163.6 ms backward and 88.0 ms forward replay) and the causal-convolution backward (128.8 ms), which the fused preparation in `gdn_fused_prep.py` targets but cannot yet be wired for its memory cost.
   - retain the fixed and exact recurrence rather than replacing the layer with a different algorithm.
   - account for the additional 583 ms GatedDeltaNet-side checkpoint recomputation when evaluating forward changes.
 

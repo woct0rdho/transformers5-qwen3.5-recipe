@@ -4,6 +4,8 @@ The optimized training workloads are sequence length 2,048 at physical batches
 1, 4, and 16:
 - Qwen3.5/3.6: `[2048|8192|32768, 2048]` hidden states, 256 experts,
   top-8 selection, and 16,384/65,536/262,144 routed rows.
+- Qwen4-Exp: `[2048|8192|32768, 2560]` hidden states, 512 experts, top-10
+  selection, and 98,304/393,216/1,572,864 rows over its 48 layers.
 - DeepSeek V4 learned routers: `[2048|8192|32768, 4096]` hidden states,
   256 experts, top-6 sqrt-softplus-plus-correction-bias selection, and
   12,288/49,152/196,608 routed rows.
@@ -16,9 +18,16 @@ The optimized training workloads are sequence length 2,048 at physical batches
 The learned-router projection is a normal BF16 `F.linear` (FP32 internal
 accumulation) whose BF16 result is upcast to FP32 so the scoring path stays in
 FP32. The Triton kernel replaces full-width softmax/sqrt-softplus plus
-`torch.topk` with one 256-expert streaming selection. Normalization is then
-evaluated only for the selected 8 or 6 experts, preserving ordinary autograd
-for router-score gradients.
+`torch.topk` with one streaming selection over the expert axis. Normalization is
+then evaluated only for the selected experts, preserving ordinary autograd for
+router-score gradients.
+
+The selection here is deterministic by construction - a tie resolves to the
+lower expert index - because a checkpointed layer's replay has to save as many
+tensors as its forward did. It is not required to reproduce `torch.topk`'s choice
+among tied experts, and no check should compare expert identities: correctness
+compares the selected weights, with a tolerance, and accepts any expert at the
+kth score threshold.
 """
 
 from typing import Any
@@ -34,6 +43,7 @@ from transformers.models.deepseek_v4.modeling_deepseek_v4 import (
 from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import (
     Qwen3_5MoeTopKRouter,
 )
+from transformers.models.qwen4_exp.modeling_qwen4_exp import Qwen4ExpTextTopKRouter
 
 from module_patching import (
     ModulePatchSpec,
@@ -46,10 +56,17 @@ _SEQUENCE_LENGTH = 2048
 _MAX_TOKENS = 16 * _SEQUENCE_LENGTH
 _QWEN_HIDDEN_SIZE = 2048
 _QWEN_TOP_K = 8
+_QWEN4_HIDDEN_SIZE = 2560
+_QWEN4_TOP_K = 10
 _DEEPSEEK_HIDDEN_SIZE = 4096
 _DEEPSEEK_TOP_K = 6
-_TRITON_NUM_EXPERTS = tl.constexpr(256)
-_TRITON_TOP_K_PAD = tl.constexpr(8)
+_SUPPORTED_ROUTER_GEOMETRIES = frozenset(
+    {
+        (_NUM_EXPERTS, _QWEN_TOP_K),
+        (_NUM_EXPERTS, _DEEPSEEK_TOP_K),
+        (512, _QWEN4_TOP_K),
+    }
+)
 
 
 def _is_supported_router_geometry(
@@ -59,21 +76,22 @@ def _is_supported_router_geometry(
 ) -> bool:
     return (
         0 < num_tokens <= _MAX_TOKENS
-        and num_experts == _NUM_EXPERTS
-        and top_k in {_QWEN_TOP_K, _DEEPSEEK_TOP_K}
+        and (num_experts, top_k) in _SUPPORTED_ROUTER_GEOMETRIES
     )
 
 
-def _router_topk_launch(num_tokens: int) -> tuple[int, int, int]:
-    """Return `(BLOCK_M, BLOCK_N, num_warps)` for the fixed token buckets.
+def _router_topk_launch(num_tokens: int, num_experts: int) -> tuple[int, int, int]:
+    """Return `(BLOCK_M, BLOCK_N, num_warps)` for the fixed token and expert buckets.
 
-    The expert axis always has 256 entries. A 64-expert streaming tile won for
-    both statically specialized top-8 identity scoring and top-6
-    sqrt-softplus-plus-bias scoring. Batch 1 uses four rows/four warps. Batches 4
-    and 16 use eight rows/eight warps. Larger row tiles increased register
-    pressure and regressed both router shapes.
+    Every geometry streams a 64-expert tile. The 256-expert shapes use four rows
+    and four warps up to 2,048 tokens and eight rows and eight warps above it,
+    because larger row tiles raised register pressure. The 512-expert top-10
+    shape keeps four rows and two warps at every row count: it streams twice as
+    many tiles per row, and more warps regress it.
     """
 
+    if num_experts == 512:
+        return 4, 64, 2
     if num_tokens <= _SEQUENCE_LENGTH:
         return 4, 64, 4
     return 8, 64, 8
@@ -98,12 +116,11 @@ def _load_router_scores(
     row_offsets,
     expert_offsets,
     row_mask,
+    NUM_EXPERTS: tl.constexpr,
     APPLY_SQRT_SOFTPLUS: tl.constexpr,
     HAS_CORRECTION_BIAS: tl.constexpr,
 ):
-    pointers = (
-        logits + row_offsets[:, None] * _TRITON_NUM_EXPERTS + expert_offsets[None, :]
-    )
+    pointers = logits + row_offsets[:, None] * NUM_EXPERTS + expert_offsets[None, :]
     scores = tl.load(pointers, mask=row_mask, other=float("-inf"))
     if APPLY_SQRT_SOFTPLUS:
         scores = scores.to(tl.float32)
@@ -121,18 +138,20 @@ def _streaming_router_topk(
     correction_bias,
     row_offsets,
     row_mask,
+    NUM_EXPERTS: tl.constexpr,
+    TOP_K_PAD: tl.constexpr,
     BLOCK_N: tl.constexpr,
     APPLY_SQRT_SOFTPLUS: tl.constexpr,
     HAS_CORRECTION_BIAS: tl.constexpr,
 ):
-    """Return eight sorted packed `(score, inverse-index)` keys per row."""
+    """Return `TOP_K_PAD` sorted packed `(score, inverse-index)` keys per row."""
 
     score_dtype: tl.constexpr = (
         tl.float32 if APPLY_SQRT_SOFTPLUS else logits.dtype.element_ty
     )
     score_bits: tl.constexpr = score_dtype.primitive_bitwidth
     key_dtype: tl.constexpr = tl.dtype(f"uint{score_bits * 2}")
-    iterations: tl.constexpr = _TRITON_NUM_EXPERTS // BLOCK_N
+    iterations: tl.constexpr = NUM_EXPERTS // BLOCK_N
 
     expert_offsets = (iterations - 1) * BLOCK_N + tl.arange(0, BLOCK_N)
     scores = _load_router_scores(
@@ -141,13 +160,14 @@ def _streaming_router_topk(
         row_offsets,
         expert_offsets,
         row_mask,
+        NUM_EXPERTS,
         APPLY_SQRT_SOFTPLUS,
         HAS_CORRECTION_BIAS,
     ).to(score_dtype)
     score_keys = _float_key(scores)
-    index_keys = (_TRITON_NUM_EXPERTS - expert_offsets)[None, :]
+    index_keys = (NUM_EXPERTS - expert_offsets)[None, :]
     packed = (score_keys.to(key_dtype) << 16) | index_keys
-    selected = tl.topk(packed, _TRITON_TOP_K_PAD, dim=1)
+    selected = tl.topk(packed, TOP_K_PAD, dim=1)
 
     for _ in tl.static_range(0, iterations - 1):
         selected = tl.bitonic_merge(selected)
@@ -158,15 +178,16 @@ def _streaming_router_topk(
             row_offsets,
             expert_offsets,
             row_mask,
+            NUM_EXPERTS,
             APPLY_SQRT_SOFTPLUS,
             HAS_CORRECTION_BIAS,
         ).to(score_dtype)
         score_keys = _float_key(scores)
-        index_keys = (_TRITON_NUM_EXPERTS - expert_offsets)[None, :]
+        index_keys = (NUM_EXPERTS - expert_offsets)[None, :]
         packed = (score_keys.to(key_dtype) << 16) | index_keys
         selected = tl.maximum(
             selected,
-            tl.topk(packed, _TRITON_TOP_K_PAD, dim=1),
+            tl.topk(packed, TOP_K_PAD, dim=1),
         )
 
     return tl.sort(selected, dim=1, descending=True)
@@ -179,6 +200,8 @@ def _router_topk_kernel(
     indices,
     num_rows,
     TOP_K: tl.constexpr,
+    TOP_K_PAD: tl.constexpr,
+    NUM_EXPERTS: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     APPLY_SQRT_SOFTPLUS: tl.constexpr,
@@ -191,13 +214,15 @@ def _router_topk_kernel(
         correction_bias,
         row_offsets,
         row_mask,
+        NUM_EXPERTS,
+        TOP_K_PAD,
         BLOCK_N,
         APPLY_SQRT_SOFTPLUS,
         HAS_CORRECTION_BIAS,
     )
-    rank_offsets = tl.arange(0, _TRITON_TOP_K_PAD)
+    rank_offsets = tl.arange(0, TOP_K_PAD)
     inverse_indices = (selected & 0xFFFF).to(tl.int64)
-    selected_indices = _TRITON_NUM_EXPERTS - inverse_indices
+    selected_indices = NUM_EXPERTS - inverse_indices
     tl.store(
         indices + row_offsets[:, None] * TOP_K + rank_offsets[None, :],
         selected_indices,
@@ -228,8 +253,8 @@ def router_topk_indices(
     apply_sqrt_softplus = score_function == "sqrtsoftplus"
     if not _is_supported_router_geometry(num_tokens, num_experts, top_k):
         raise RuntimeError(
-            "Optimized router selection supports only 256-expert top-8/top-6 "
-            "workloads with at most 32,768 tokens."
+            "Optimized router selection supports only the 256-expert top-8/top-6 "
+            "and 512-expert top-10 workloads with at most 32,768 tokens."
         )
     if logits.device.type != "cuda" or logits.dtype not in {
         torch.bfloat16,
@@ -263,13 +288,15 @@ def router_topk_indices(
         dtype=torch.int64,
         device=logits.device,
     )
-    block_m, block_n, num_warps = _router_topk_launch(num_tokens)
+    block_m, block_n, num_warps = _router_topk_launch(num_tokens, num_experts)
     _router_topk_kernel[(triton.cdiv(num_tokens, block_m),)](
         logits,
         correction_bias if correction_bias is not None else logits,
         indices,
         num_tokens,
         TOP_K=top_k,
+        TOP_K_PAD=triton.next_power_of_2(top_k),
+        NUM_EXPERTS=num_experts,
         BLOCK_M=block_m,
         BLOCK_N=block_n,
         APPLY_SQRT_SOFTPLUS=apply_sqrt_softplus,
@@ -287,6 +314,7 @@ _HASH_BLOCK_K = 1024
 _HASH_BLOCK_D = 2048
 _HASH_FORWARD_WARPS = 4
 _HASH_BACKWARD_WARPS = 2
+_HASH_TOP_K_PAD = tl.constexpr(8)
 
 
 @triton.jit
@@ -300,14 +328,14 @@ def _hash_router_logits_forward_kernel(
     BLOCK_K: tl.constexpr,
 ):
     token = tl.program_id(0)
-    rank_offsets = tl.arange(0, _TRITON_TOP_K_PAD)
+    rank_offsets = tl.arange(0, _HASH_TOP_K_PAD)
     rank_mask = rank_offsets < TOP_K
     expert_ids = tl.load(
         indices_ptr + token * TOP_K + rank_offsets,
         mask=rank_mask,
         other=0,
     ).to(tl.int64)
-    projected = tl.zeros((_TRITON_TOP_K_PAD,), tl.float32)
+    projected = tl.zeros((_HASH_TOP_K_PAD,), tl.float32)
     hidden_base = hidden_ptr + token * HIDDEN
     for k_start in tl.range(0, HIDDEN, BLOCK_K, loop_unroll_factor=1):
         k_offsets = k_start + tl.arange(0, BLOCK_K)
@@ -333,7 +361,7 @@ def _hash_router_input_grad_kernel(
     BLOCK_D: tl.constexpr,
 ):
     token = tl.program_id(0)
-    rank_offsets = tl.arange(0, _TRITON_TOP_K_PAD)
+    rank_offsets = tl.arange(0, _HASH_TOP_K_PAD)
     rank_mask = rank_offsets < TOP_K
     expert_ids = tl.load(
         indices_ptr + token * TOP_K + rank_offsets,
@@ -491,6 +519,22 @@ def _qwen_router_forward(
     return router_logits, router_scores, router_indices
 
 
+def _qwen4_router_forward(
+    self: Qwen4ExpTextTopKRouter,
+    hidden_states: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    flat = hidden_states.reshape(-1, self.hidden_dim)
+    # The projection rounds to BF16 at the module boundary and the scoring path then runs in FP32, as
+    # the model's own forward does.
+    projection = F.linear(flat, self.weight)
+    logits = projection.to(torch.float32)
+    indices = router_topk_indices(logits, self.top_k)
+    # A softmax over the selected scores is the model's full-width softmax renormalized over its own
+    # top-k: `softmax(x)_i / sum_{j in S} softmax(x)_j` over a selected set depends only on that set.
+    weights = torch.softmax(logits.gather(1, indices), dim=-1)
+    return logits, weights.to(projection.dtype), indices
+
+
 def _deepseek_topk_router_forward(
     self: DeepseekV4TopKRouter,
     hidden_states: torch.Tensor,
@@ -541,9 +585,11 @@ def _bind_router_expert_prior(
 
 
 _EXPECTED_QWEN_ROUTERS = 40
+_EXPECTED_QWEN4_ROUTERS = 48
 _EXPECTED_DEEPSEEK_TOPK_ROUTERS = 40
 _EXPECTED_DEEPSEEK_HASH_ROUTERS = 3
 _QWEN_ROUTER_MARKER = "_patched_qwen_router"
+_QWEN4_ROUTER_MARKER = "_patched_qwen4_router"
 _DEEPSEEK_TOPK_ROUTER_MARKER = "_patched_deepseek_topk_router"
 _DEEPSEEK_HASH_ROUTER_MARKER = "_patched_deepseek_hash_router"
 
@@ -555,6 +601,23 @@ def _validate_qwen_router(name: str, module: Qwen3_5MoeTopKRouter) -> None:
         or module.top_k != _QWEN_TOP_K
     ):
         raise RuntimeError(f"Qwen router {name!r} does not match 2048/256/top-8.")
+
+
+def _validate_qwen4_router(name: str, module: Qwen4ExpTextTopKRouter) -> None:
+    if (
+        module.hidden_dim != _QWEN4_HIDDEN_SIZE
+        or module.num_experts != 512
+        or module.top_k != _QWEN4_TOP_K
+    ):
+        raise RuntimeError(f"Qwen4 router {name!r} does not match 2560/512/top-10.")
+    if module.weight.device.type != "cuda":
+        raise RuntimeError(f"Qwen4 router {name!r} requires a CUDA/ROCm weight")
+    if not module.norm_topk_prob:
+        # Without the renormalization the selected weight is the full-width softmax value, which the
+        # selected scores alone cannot reproduce.
+        raise RuntimeError(
+            f"Qwen4 router {name!r} does not normalize the top-k probabilities"
+        )
 
 
 def _validate_deepseek_router(
@@ -606,6 +669,14 @@ def _router_specs(
             freeze_weight=False,
         ),
         ModulePatchSpec(
+            module_type=Qwen4ExpTextTopKRouter,
+            forward=_qwen4_router_forward,
+            handled_key="qwen4",
+            validate=_validate_qwen4_router,
+            marker=_QWEN4_ROUTER_MARKER,
+            freeze_weight=False,
+        ),
+        ModulePatchSpec(
             module_type=DeepseekV4TopKRouter,
             forward=_deepseek_topk_router_forward,
             handled_key="deepseek_topk",
@@ -651,6 +722,10 @@ def require_complete_fast_moe_ranking(
     if model_type in {"qwen3_5_moe", "qwen3_5_moe_text"}:
         require_complete_inventory(
             report, {"qwen": _EXPECTED_QWEN_ROUTERS}, subject="Qwen router"
+        )
+    elif model_type == "qwen4_exp_text":
+        require_complete_inventory(
+            report, {"qwen4": _EXPECTED_QWEN4_ROUTERS}, subject="Qwen4-Exp router"
         )
     elif model_type == "deepseek_v4":
         require_complete_inventory(

@@ -64,12 +64,52 @@ FAMILIES = {
             (4, 2048),
         ),
     },
+    "qwen3.8": {
+        "gmm_base": (
+            (2560, 640, True),
+            (640, 2560, True),
+            (640, 2560, False),
+            (2560, 640, False),
+        ),
+        "gmm_lora": (
+            (2560, 4, True),
+            (640, 4, True),
+            (4, 1280, True),
+            (4, 2560, True),
+            (4, 2560, False),
+            (4, 640, False),
+            (1280, 4, False),
+            (2560, 4, False),
+        ),
+        "ptgmm_base": (
+            (2560, 640),
+            (640, 2560),
+        ),
+        "ptgmm_lora": (
+            (2560, 4),
+            (640, 4),
+            (4, 1280),
+            (4, 2560),
+        ),
+    },
 }
 ROWS = {
     "deepseek": {1: 12288, 4: 49152, 16: 196608},
     "qwen": {1: 16384, 4: 65536, 16: 262144},
+    "qwen3.8": {1: 20480, 4: 81920, 16: 327680},
 }
-EXPERT_PRIORS = ("qwen-learned", "deepseek-learned", "deepseek-hash")
+PRIOR_FAMILIES = {
+    "qwen-learned": "qwen",
+    "qwen3.8-learned": "qwen3.8",
+    "deepseek-learned": "deepseek",
+    "deepseek-hash": "deepseek",
+}
+EXPERT_PRIORS = (
+    "qwen-learned",
+    "qwen3.8-learned",
+    "deepseek-learned",
+    "deepseek-hash",
+)
 
 
 def main() -> None:
@@ -129,7 +169,7 @@ def main() -> None:
     expert_priors = (args.expert_prior,) if args.expert_prior else EXPERT_PRIORS
     results = []
     for expert_prior in expert_priors:
-        family = "qwen" if expert_prior == "qwen-learned" else "deepseek"
+        family = PRIOR_FAMILIES[expert_prior]
         for target_kind in target_kinds:
             for batch in batches:
                 for op in ops:
@@ -233,18 +273,18 @@ def main() -> None:
                             "log": str(log),
                         }
                         if not timed_out and output.exists():
-                            try:
-                                report = json.loads(output.read_text(encoding="utf-8"))
-                            except (OSError, json.JSONDecodeError):
-                                report = None
-                            if isinstance(report, dict):
-                                record.update(
-                                    {
-                                        "accepted": report.get("accepted"),
-                                        "selected": report.get("selected"),
-                                        "correctness": report.get("correctness"),
-                                    }
+                            report = json.loads(output.read_text(encoding="utf-8"))
+                            if not isinstance(report, dict):
+                                raise TypeError(
+                                    f"{output} does not contain a JSON object"
                                 )
+                            record.update(
+                                {
+                                    "accepted": report.get("accepted"),
+                                    "selected": report.get("selected"),
+                                    "correctness": report.get("correctness"),
+                                }
+                            )
                         results.append(record)
                         print(json.dumps(record, sort_keys=True), flush=True)
     manifest = {

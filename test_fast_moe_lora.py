@@ -246,24 +246,31 @@ def test_packed_expert_projection_backward_is_exact_logical_jacobian(
     assert down.grad is None
 
 
-def _count_synchronizing_calls(call) -> int:
-    """Count the synchronizing CUDA operations a call performs."""
+@pytest.fixture
+def sync_debug_mode():
+    """Have the CUDA runtime report the synchronizing operations a call performs."""
 
     if not hasattr(torch.cuda, "set_sync_debug_mode"):
         pytest.skip("torch.cuda.set_sync_debug_mode is unavailable")
+    torch.cuda.set_sync_debug_mode("warn")
+    yield
+    torch.cuda.set_sync_debug_mode("default")
+
+
+def _count_synchronizing_calls(call) -> int:
+    """Count the synchronizing CUDA operations a call performs, under the `sync_debug_mode` fixture."""
+
     call()
     torch.cuda.synchronize()
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        torch.cuda.set_sync_debug_mode("warn")
-        try:
-            call()
-        finally:
-            torch.cuda.set_sync_debug_mode("default")
+        call()
     return sum("synchronizing CUDA operation" in str(entry.message) for entry in caught)
 
 
-def test_packed_expert_execution_returns_fixed_length_group_metadata() -> None:
+def test_packed_expert_execution_returns_fixed_length_group_metadata(
+    sync_debug_mode,
+) -> None:
     """Every expert is a group, so no routed row count reaches the host."""
 
     num_tokens, top_k, num_experts = 2048, 8, 256

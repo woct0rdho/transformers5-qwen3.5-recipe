@@ -274,7 +274,7 @@ def main() -> None:
             local_files_only=True,
             dtype=torch.bfloat16,
             device_map={"": "cuda:0"},
-            attn_implementation="eager",
+            attn_implementation=None,
             output_loading_info=True,
         )
 

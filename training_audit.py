@@ -14,7 +14,7 @@ from transformers.integrations.gguf.gguf_quantized_parameter import (
 
 
 def process_memory() -> dict[str, int]:
-    """Read process RSS/file/private/swap and host swap availability."""
+    """Read process RSS/file/private/swap and the machine's unified-pool state."""
 
     values: dict[str, int] = {}
     for line in Path("/proc/self/smaps_rollup").read_text().splitlines():
@@ -23,7 +23,17 @@ def process_memory() -> dict[str, int]:
             values[f"process_{key.lower()}_bytes"] = int(rest.split()[0]) * 1024
     for line in Path("/proc/meminfo").read_text().splitlines():
         key, _, rest = line.partition(":")
-        if key in {"SwapTotal", "SwapFree"}:
+        # This device's memory is the machine's memory, so the machine's own accounting says how
+        # much room a phase has. `MemAvailable` is the number that decides whether it will swap.
+        if key in {
+            "MemTotal",
+            "MemFree",
+            "MemAvailable",
+            "Cached",
+            "Shmem",
+            "SwapTotal",
+            "SwapFree",
+        }:
             values[f"system_{key.lower()}_bytes"] = int(rest.split()[0]) * 1024
     return values
 
@@ -261,7 +271,9 @@ def representative_packed_state(model: torch.nn.Module) -> dict[str, Any]:
 
     selected: dict[int, tuple[str, GgufQuantizedParameter]] = {}
     for name, parameter in model.named_parameters():
-        if isinstance(parameter, GgufQuantizedParameter):
+        # A parameter with no payload cannot witness anything, so it never stands in for its quantization
+        # type: the disk-backed PLE table is one, and the type it owns has to be sampled elsewhere.
+        if isinstance(parameter, GgufQuantizedParameter) and parameter.numel():
             selected.setdefault(int(parameter.quant_type), (name, parameter))
     if not selected:
         raise RuntimeError("The audited model has no packed GGUF parameters.")

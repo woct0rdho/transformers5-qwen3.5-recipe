@@ -12,11 +12,13 @@ from transformers.models.deepseek_v4.modeling_deepseek_v4 import (
 from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import (
     Qwen3_5MoeTopKRouter,
 )
+from transformers.models.qwen4_exp.modeling_qwen4_exp import Qwen4ExpTextTopKRouter
 
 from fast_moe_ranking import (
     _is_supported_router_geometry,
     _router_topk_launch,
     configure_fast_moe_ranking,
+    require_complete_fast_moe_ranking,
     router_topk_indices,
 )
 from test_support import assert_relative_rmse, require_grad
@@ -27,6 +29,15 @@ def _qwen_config() -> SimpleNamespace:
         hidden_size=2048,
         num_experts=256,
         num_experts_per_tok=8,
+    )
+
+
+def _qwen4_config() -> SimpleNamespace:
+    return SimpleNamespace(
+        hidden_size=2560,
+        num_experts=512,
+        num_experts_per_tok=10,
+        norm_topk_prob=True,
     )
 
 
@@ -42,9 +53,15 @@ def _deepseek_config() -> SimpleNamespace:
 
 
 class _RouterModel(torch.nn.Module):
-    def __init__(self, router: torch.nn.Module, *, scoring_func: str | None = None):
+    def __init__(
+        self,
+        router: torch.nn.Module,
+        *,
+        scoring_func: str | None = None,
+        model_type: str = "test",
+    ):
         super().__init__()
-        self.config = SimpleNamespace(model_type="test", scoring_func=scoring_func)
+        self.config = SimpleNamespace(model_type=model_type, scoring_func=scoring_func)
         self.router = router
 
 
@@ -67,9 +84,11 @@ class _MoeModel(torch.nn.Module):
         )
 
 
-def _assert_valid_route_indices(indices: torch.Tensor, top_k: int) -> None:
+def _assert_valid_route_indices(
+    indices: torch.Tensor, top_k: int, num_experts: int = 256
+) -> None:
     assert indices.shape[-1] == top_k
-    assert bool(torch.all((indices >= 0) & (indices < 256)))
+    assert bool(torch.all((indices >= 0) & (indices < num_experts)))
     sorted_indices = torch.sort(indices, dim=-1).values
     assert bool(torch.all(sorted_indices.diff(dim=-1) > 0))
 
@@ -145,6 +164,16 @@ def _qwen_fp32_reference(
     return logits, weights, indices
 
 
+def _qwen4_fp32_reference(
+    router: Qwen4ExpTextTopKRouter, hidden_states: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    logits = _full_fp32_linear(hidden_states, router.weight)
+    probabilities = torch.softmax(logits, dim=-1)
+    values, indices = torch.topk(probabilities, router.top_k, dim=-1)
+    weights = values / values.sum(dim=-1, keepdim=True)
+    return logits, weights, indices
+
+
 def _deepseek_fp32_reference(
     router: Any, hidden_states: torch.Tensor, input_ids: torch.Tensor | None = None
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -180,12 +209,21 @@ def test_router_geometry_and_launch_heuristics(
     tokens = batch_size * 2048
     assert _is_supported_router_geometry(tokens, 256, 8)
     assert _is_supported_router_geometry(tokens, 256, 6)
-    assert _router_topk_launch(tokens) == qwen_launch == deepseek_launch
+    assert _is_supported_router_geometry(tokens, 512, 10)
+    assert _router_topk_launch(tokens, 256) == qwen_launch == deepseek_launch
+    assert _router_topk_launch(tokens, 512) == (4, 64, 2)
 
 
 @pytest.mark.parametrize(
     ("tokens", "experts", "top_k"),
-    [(0, 256, 8), (32769, 256, 8), (2048, 128, 8), (2048, 256, 4)],
+    [
+        (0, 256, 8),
+        (32769, 256, 8),
+        (2048, 128, 8),
+        (2048, 256, 4),
+        (2048, 512, 8),
+        (2048, 512, 12),
+    ],
 )
 def test_unknown_router_geometry_is_not_specialized(
     tokens: int, experts: int, top_k: int
@@ -195,7 +233,7 @@ def test_unknown_router_geometry_is_not_specialized(
 
 def test_unknown_router_geometry_is_rejected() -> None:
     logits = torch.randn(8, 128, device="cuda", dtype=torch.float32)
-    with pytest.raises(RuntimeError, match="supports only 256-expert"):
+    with pytest.raises(RuntimeError, match="supports only the 256-expert"):
         router_topk_indices(logits, 4)
 
 
@@ -286,19 +324,95 @@ def test_deepseek_router_matches_reference_forward_and_gradient() -> None:
     _assert_finite_nonzero_gradient(require_grad(hidden_optimized))
 
 
+def test_qwen4_router_matches_reference_forward_and_gradient() -> None:
+    torch.manual_seed(4242)
+    reference = Qwen4ExpTextTopKRouter(_qwen4_config()).to(
+        device="cuda", dtype=torch.bfloat16
+    )
+    reference.weight.data.normal_(std=0.02)
+    optimized = deepcopy(reference)
+    configure_fast_moe_ranking(_RouterModel(optimized))
+
+    hidden_reference = torch.randn(
+        257, 2560, device="cuda", dtype=torch.bfloat16, requires_grad=True
+    )
+    hidden_optimized = hidden_reference.detach().clone().requires_grad_(True)
+    logits_reference, weights_reference, indices_reference = _qwen4_fp32_reference(
+        reference, hidden_reference
+    )
+    logits_optimized, weights_optimized, indices_optimized = optimized(hidden_optimized)
+
+    _assert_valid_route_indices(indices_reference, 10, num_experts=512)
+    _assert_valid_route_indices(indices_optimized, 10, num_experts=512)
+    assert logits_optimized.dtype == torch.float32
+    # Same intentional BF16 projection rounding as the other router tests.
+    assert_relative_rmse(logits_optimized, logits_reference, 1e-2)
+    _assert_selected_weights_close(
+        weights_optimized.float(),
+        weights_reference.to(weights_optimized.dtype).float(),
+    )
+
+    loss_reference = _symmetric_weight_loss(weights_reference)
+    loss_optimized = _symmetric_weight_loss(weights_optimized)
+    loss_reference.backward()
+    loss_optimized.backward()
+    _assert_finite_nonzero_gradient(require_grad(hidden_reference))
+    _assert_finite_nonzero_gradient(require_grad(hidden_optimized))
+
+
+def test_qwen4_tied_scores_resolve_to_the_lower_expert_index() -> None:
+    reference = Qwen4ExpTextTopKRouter(_qwen4_config()).to(
+        device="cuda", dtype=torch.bfloat16
+    )
+    reference.weight.data.zero_()
+    optimized = deepcopy(reference)
+    configure_fast_moe_ranking(_RouterModel(optimized))
+
+    hidden = torch.randn(32, 2560, device="cuda", dtype=torch.bfloat16)
+    _, first_values, first_indices = optimized(hidden)
+    _, second_values, second_indices = optimized(hidden)
+
+    # Every expert ties, so the selection is the lowest ten ids, and it repeats across calls. The
+    # reference leaves both the choice and the repeat to `torch.topk`.
+    expected = torch.arange(10, device="cuda").expand(32, 10)
+    assert torch.equal(first_indices, expected)
+    assert torch.equal(second_indices, expected)
+    assert torch.equal(first_values, second_values)
+
+
+def test_qwen4_router_inventory_is_required() -> None:
+    routers = [
+        Qwen4ExpTextTopKRouter(_qwen4_config()).cuda().to(torch.bfloat16)
+        for _ in range(2)
+    ]
+    layers = torch.nn.ModuleList([_MoeLayer(router) for router in routers])
+    model = _RouterModel(torch.nn.Module())
+    model.layers = layers
+    report = configure_fast_moe_ranking(model)
+    assert report["qwen4"] == 2
+    with pytest.raises(RuntimeError, match="incomplete"):
+        require_complete_fast_moe_ranking(report, "qwen4_exp_text")
+
+
 def test_router_ties_accept_any_expert_at_the_kth_threshold() -> None:
-    logits = torch.zeros(19, 256, device="cuda", dtype=torch.float32)
-    qwen_indices = router_topk_indices(logits, 8)
+    qwen_logits = torch.zeros(19, 256, device="cuda", dtype=torch.float32)
+    qwen4_logits = torch.zeros(19, 512, device="cuda", dtype=torch.float32)
+    qwen_indices = router_topk_indices(qwen_logits, 8)
     deepseek_indices = router_topk_indices(
-        logits,
+        qwen_logits,
         6,
         correction_bias=torch.zeros(256, device="cuda"),
         score_function="sqrtsoftplus",
     )
+    qwen4_indices = router_topk_indices(qwen4_logits, 10)
 
-    for indices, top_k in ((qwen_indices, 8), (deepseek_indices, 6)):
+    for logits, indices, top_k in (
+        (qwen_logits, qwen_indices, 8),
+        (qwen_logits, deepseek_indices, 6),
+        (qwen4_logits, qwen4_indices, 10),
+    ):
         assert indices.shape == (19, top_k)
-        _assert_valid_route_indices(indices, top_k)
+        _assert_valid_route_indices(indices, top_k, num_experts=logits.shape[1])
         # Every expert is tied at the kth threshold, so expert identity is not
         # compared with torch.topk's implementation-defined tie choice.
         selected_scores = logits.gather(1, indices)

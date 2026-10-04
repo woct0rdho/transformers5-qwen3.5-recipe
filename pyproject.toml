@@ -5,7 +5,7 @@ target-version = "py310"
 extend-select = ["I"]
 
 [tool.ty.analysis]
-replace-imports-with-any = ["torch_ggml_ops", "triton", "triton.**"]
+replace-imports-with-any = ["triton", "triton.**"]
 
 [tool.ty.environment]
 python-version = "3.10"

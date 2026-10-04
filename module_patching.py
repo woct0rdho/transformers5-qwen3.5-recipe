@@ -4,14 +4,14 @@
 `fast_moe_ranking.py` install a replacement forward on selected module instances and then gate the
 run on a fixed inventory. They need the same protocol, so it lives here and each family module only
 supplies what is actually family-specific:
-- match modules by type, in `named_modules()` order;
-- count every match, patched or not, so the inventory gate sees the whole model;
-- validate the site (device, dtype, geometry) before touching it, and prepare it if needed;
-- optionally freeze the replaced weight, which sits outside the fixed LoRA target contract;
+- match modules by type, in `named_modules()` order.
+- count every match, patched or not, so the inventory gate sees the whole model.
+- validate the site (device, dtype, geometry) before touching it, and prepare it if needed.
+- optionally freeze the replaced weight, which sits outside the fixed LoRA target contract.
 - set a marker attribute and, when a forward is supplied, replace `forward` with `MethodType`, so
-  a second call only counts;
+  a second call only counts.
 - report the inventory counters, per-family names, `patched`, `already_patched`, and
-  `patched_names`;
+  `patched_names`.
 - fail closed through `require_complete_inventory` when the inventory is not exactly covered.
 
 Only the forward, the site hooks, and the skip rule are per-family. `matches` selects which
@@ -22,7 +22,7 @@ frozen-weight backward of the DeepSeek norms) stays in the family module. This l
 the math.
 
 Marker convention: an installed forward is marked with a `_patched_<family>` attribute so a second
-pass can count it and a debugger can see what owns the module. Flags that record a *choice* rather
+pass can count it and a debugger can see what owns the module. Flags that record a choice rather
 than an installation (`fast_lora._GENERIC_PACKED_FORWARD_ATTR`, `_aiter_expert_prior`) deliberately
 do not use the prefix.
 """

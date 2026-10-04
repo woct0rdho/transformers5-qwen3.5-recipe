@@ -28,8 +28,3 @@ def dequantize_gguf_tensor(
     return dequantize(payload, int(quant_type), dtype=dtype).reshape(
         *payload.shape[:-1], logical_last_dim
     )
-
-
-__all__ = [
-    "dequantize_gguf_tensor",
-]

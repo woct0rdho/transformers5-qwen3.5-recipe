@@ -11,7 +11,7 @@ cannot merge adapter deltas into their packed physical weights. MoE adapters
 are handled separately by `fast_moe_lora.py`.
 """
 
-from typing import Any
+from typing import Any, cast
 
 import torch
 from peft import LoraConfig
@@ -23,23 +23,35 @@ from transformers.integrations.gguf.gguf_quantized_parameter import (
 )
 from transformers.integrations.gguf.modules import GgufLinear
 
-GENERIC_PACKED_FORWARD_SUFFIXES = (
-    ".linear_attn.in_proj_qkv",
-    ".linear_attn.in_proj_z",
-    ".linear_attn.out_proj",
-)
-_GENERIC_PACKED_FORWARD_ATTR = "_generic_packed_forward"
 
+def packed_mmq_linear(module: GgufLinear, input: torch.Tensor) -> torch.Tensor:
+    """Run one frozen packed GGUF projection through the exported dense MMQ entry point.
 
-def uses_generic_packed_forward(name: str) -> bool:
-    """Whether a packed ordinary projection must stay on the generic base forward.
-
-    Matched by module name because the GGUF runtime applies those reorders to the packed
-    payload without leaving a per-module marker, and geometry alone cannot separate e.g.
-    `linear_attn.in_proj_qkv` from `q_proj`, which share a logical shape.
+    The LoRA base path and the frozen-projection patch share this boundary, so the kernel call,
+    the bias handling, and the BF16 compute-dtype requirement have one definition. The caller
+    owns the input contract: one tensor, no extra arguments.
     """
 
-    return f".{name}".endswith(GENERIC_PACKED_FORWARD_SUFFIXES)
+    weight = module.weight
+    if not isinstance(weight, GgufQuantizedParameter):
+        raise TypeError(
+            "The packed GGUF MMQ path requires a GGUF-quantized weight, got "
+            f"{type(weight).__name__}."
+        )
+    if module.compute_dtype != torch.bfloat16:
+        raise RuntimeError(
+            "The packed GGUF MMQ linear path requires BF16 compute_dtype."
+        )
+
+    result = mmq(
+        input,
+        weight.as_subclass(torch.Tensor),
+        int(weight.quant_type),
+        module.out_features,
+    )
+    if module.bias is not None:
+        result = result + module.bias.to(device=result.device, dtype=result.dtype)
+    return result
 
 
 def _fused_lora_add(
@@ -136,34 +148,22 @@ class FastLoraLinear(_FastLoraForwardMixin, PeftLinear):
 
 
 class FastGgufLoraLinear(FastLoraLinear):
-    """Fast LoRA wrapper for frozen packed `GgufLinear` modules.
-
-    Permutation-free packed weights of ordinary projections use exported dense MMQ in both
-    directions. Fused recurrent projections and modules with a runtime layout permutation use
-    the generic compiled-dequant base forward. Kernel support is authoritative in
-    `torch-ggml-ops` and is not probed here.
-    """
-
     def packed_mmq_weight(self) -> GgufQuantizedParameter | None:
-        """The packed base weight when this wrapper may use the dense MMQ path."""
-
         base = self.base_layer
         weight = base.weight
-        if not isinstance(weight, GgufQuantizedParameter) or getattr(
-            base, _GENERIC_PACKED_FORWARD_ATTR, False
-        ):
+        if not isinstance(weight, GgufQuantizedParameter):
+            return None
+        if base.input_permutation is not None:
             return None
         return weight
 
     def uses_packed_mmq(self) -> bool:
-        """Whether this wrapper may call the native dense packed MMQ path."""
-
         return self.packed_mmq_weight() is not None
 
     def _base_layer_forward(
         self, x: torch.Tensor, *args: Any, **kwargs: Any
     ) -> torch.Tensor:
-        base = self.base_layer
+        base = cast(GgufLinear, self.base_layer)
         weight = self.packed_mmq_weight()
         if weight is None:
             return base(x, *args, **kwargs)
@@ -171,21 +171,8 @@ class FastGgufLoraLinear(FastLoraLinear):
             raise TypeError(
                 "The packed GGUF MMQ linear path accepts only its input tensor."
             )
-        if base.compute_dtype != torch.bfloat16:
-            raise RuntimeError(
-                "The packed GGUF MMQ linear path requires BF16 compute_dtype."
-            )
 
-        payload = weight.as_subclass(torch.Tensor)
-        result = mmq(
-            x,
-            payload,
-            int(weight.quant_type),
-            base.out_features,
-        )
-        if base.bias is not None:
-            result = result + base.bias.to(device=result.device, dtype=result.dtype)
-        return result
+        return packed_mmq_linear(base, x)
 
     def merge(
         self, safe_merge: bool = False, adapter_names: list[str] | None = None
@@ -206,9 +193,6 @@ def register_fast_lora(lora_config: LoraConfig, model: torch.nn.Module) -> LoraC
     PEFT currently exposes custom LoRA modules through the experimental private
     `LoraConfig._register_custom_module` API. Registration is config-local:
     no PEFT or Transformers class is monkey-patched process-wide.
-
-    `model` is marked for the projections that must keep the generic packed
-    base forward. The wrapper reads that mark when it picks its path.
     """
 
     register = getattr(lora_config, "_register_custom_module", None)
@@ -217,10 +201,6 @@ def register_fast_lora(lora_config: LoraConfig, model: torch.nn.Module) -> LoraC
             "This PEFT version has no LoraConfig._register_custom_module API. "
             "Cannot install fast LoRA without a global monkey patch."
         )
-
-    for name, module in model.named_modules():
-        if uses_generic_packed_forward(name):
-            setattr(module, _GENERIC_PACKED_FORWARD_ATTR, True)
 
     # GgufLinear subclasses nn.Linear, so its merge-safe wrapper must be checked first.
     register(

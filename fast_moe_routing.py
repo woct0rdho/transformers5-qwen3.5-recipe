@@ -7,11 +7,14 @@ import triton.language as tl
 # Fixed sequence-2048 training geometries:
 # - Qwen batches 1/4/16: [2048|8192|32768, 2048], top-8, with
 #   16,384/65,536/262,144 routed rows.
+# - Qwen4-Exp batch 1: [2048, 2560], top-10, with 20,480 routed rows.
 # - DeepSeek batches 1/4/16: [2048|8192|32768, 4096], top-6, with
 #   12,288/49,152/196,608 routed rows.
 # The two smaller entries keep the synthetic expert-wrapper regression tests
 # on the same optimized implementation instead of retaining a Torch fallback.
-_SUPPORTED_ROUTING_GEOMETRIES = frozenset({(8, 2048), (6, 4096), (4, 2048), (1, 256)})
+_SUPPORTED_ROUTING_GEOMETRIES = frozenset(
+    {(8, 2048), (6, 4096), (10, 2560), (4, 2048), (1, 256)}
+)
 _MAX_TOKENS = 16 * 2048
 
 
@@ -42,6 +45,17 @@ def _routing_gather_forward_launch(
     return hidden_dim, 4
 
 
+def _next_power_of_two(value: int) -> int:
+    """Smallest power of two that is at least `value`.
+
+    Each backward program reduces over the full hidden width of one token or route, so its block has
+    to cover that width on its own. A power-of-two block with a mask leaves the existing Qwen and
+    DeepSeek tilings unchanged and makes a non-power-of-two width such as Qwen4-Exp's 2560 valid.
+    """
+
+    return max(1, 1 << (int(value) - 1).bit_length())
+
+
 def _routing_combine_forward_launch(
     num_tokens: int,
     top_k: int,
@@ -49,14 +63,16 @@ def _routing_combine_forward_launch(
 ) -> tuple[int, int]:
     """Return `(BLOCK_H, num_warps)` for fused weighted route combining.
 
-    Production workloads are Qwen `[T, 2048]` top-8 and DeepSeek
+    Production workloads are Qwen `[T, 2048]` top-8, Qwen4-Exp `[T, 2560]` top-10, and DeepSeek
     `[T, 4096]` top-6 for `T = 2048, 8192, 32768`.
     """
 
     del top_k
     if hidden_dim >= 4096:
         return 4096, 8
-    return hidden_dim, 8 if num_tokens <= 2048 else 4
+    # A width above one 2048 block uses the second grid axis rather than a larger block, because the
+    # block must stay a power of two.
+    return min(hidden_dim, 2048), 8 if num_tokens <= 2048 else 4
 
 
 def _routing_launch_warps(
@@ -130,17 +146,20 @@ def _route_gather_backward_kernel(
     grad_hidden,
     HIDDEN_SIZE: tl.constexpr,
     TOP_K: tl.constexpr,
+    HIDDEN_BLOCK: tl.constexpr,
+    TOP_K_BLOCK: tl.constexpr,
 ):
     token = tl.program_id(0)
-    hidden_offsets = tl.arange(0, HIDDEN_SIZE)
-    route_ranks = tl.arange(0, 8)
+    hidden_offsets = tl.arange(0, HIDDEN_BLOCK)
+    hidden_mask = hidden_offsets < HIDDEN_SIZE
+    route_ranks = tl.arange(0, TOP_K_BLOCK)
     route_offsets = token * TOP_K + route_ranks
     remaining_positions = tl.load(
         inverse_permutation + route_offsets,
         mask=route_ranks < TOP_K,
         other=0x7FFFFFFF,
     )
-    reduced = tl.zeros((HIDDEN_SIZE,), dtype=tl.float32)
+    reduced = tl.zeros((HIDDEN_BLOCK,), dtype=tl.float32)
 
     # Duplicates accumulate in FP32 and round once on the store. Eager autograd
     # rounds the BF16 destination after every duplicate instead. The difference is
@@ -148,9 +167,11 @@ def _route_gather_backward_kernel(
     # regression test gates it rather than reproducing the rounding order.
     for _ in tl.static_range(0, TOP_K):
         position = tl.min(remaining_positions, axis=0)
-        grad = tl.load(grad_selected + position * HIDDEN_SIZE + hidden_offsets).to(
-            tl.float32
-        )
+        grad = tl.load(
+            grad_selected + position * HIDDEN_SIZE + hidden_offsets,
+            mask=hidden_mask,
+            other=0.0,
+        ).to(tl.float32)
         reduced = reduced + grad
         remaining_positions = tl.where(
             remaining_positions == position,
@@ -158,7 +179,9 @@ def _route_gather_backward_kernel(
             remaining_positions,
         )
 
-    tl.store(grad_hidden + token * HIDDEN_SIZE + hidden_offsets, reduced)
+    tl.store(
+        grad_hidden + token * HIDDEN_SIZE + hidden_offsets, reduced, mask=hidden_mask
+    )
 
 
 @triton.jit
@@ -208,25 +231,34 @@ def _route_combine_backward_kernel(
     grad_routing_weights,
     HIDDEN_SIZE: tl.constexpr,
     TOP_K: tl.constexpr,
+    HIDDEN_BLOCK: tl.constexpr,
 ):
     sorted_route = tl.program_id(0)
     original_route = tl.load(permutation + sorted_route)
     token = original_route // TOP_K
-    hidden_offsets = tl.arange(0, HIDDEN_SIZE)
+    hidden_offsets = tl.arange(0, HIDDEN_BLOCK)
+    hidden_mask = hidden_offsets < HIDDEN_SIZE
 
-    grad = tl.load(grad_final + token * HIDDEN_SIZE + hidden_offsets).to(tl.float32)
-    output = tl.load(expert_output + sorted_route * HIDDEN_SIZE + hidden_offsets).to(
-        tl.float32
-    )
+    grad = tl.load(
+        grad_final + token * HIDDEN_SIZE + hidden_offsets,
+        mask=hidden_mask,
+        other=0.0,
+    ).to(tl.float32)
+    output = tl.load(
+        expert_output + sorted_route * HIDDEN_SIZE + hidden_offsets,
+        mask=hidden_mask,
+        other=0.0,
+    ).to(tl.float32)
     # As in the forward kernel, the gate's dtype is preserved for the activation
     # gradient. The weight gradient below does not read it at all.
     weight = tl.load(routing_weights + original_route).to(tl.float32)
 
     output_grad = (grad * weight).to(tl.bfloat16)
-    weight_grad_product = grad * output
+    weight_grad_product = tl.where(hidden_mask, grad * output, 0.0)
     tl.store(
         grad_expert_output + sorted_route * HIDDEN_SIZE + hidden_offsets,
         output_grad,
+        mask=hidden_mask,
     )
     weight_grad = tl.sum(weight_grad_product, axis=0)
     tl.store(grad_routing_weights + original_route, weight_grad)
@@ -286,6 +318,8 @@ class _RouteGather(torch.autograd.Function):
             grad_hidden,
             HIDDEN_SIZE=hidden_dim,
             TOP_K=num_top_k,
+            HIDDEN_BLOCK=_next_power_of_two(hidden_dim),
+            TOP_K_BLOCK=_next_power_of_two(num_top_k),
             num_warps=ctx.gather_warps,
         )
         return grad_hidden, None, None
@@ -343,6 +377,7 @@ class _RouteCombine(torch.autograd.Function):
             grad_routing_weights,
             HIDDEN_SIZE=hidden_dim,
             TOP_K=num_top_k,
+            HIDDEN_BLOCK=_next_power_of_two(hidden_dim),
             num_warps=ctx.combine_warps,
         )
         return (
@@ -363,8 +398,8 @@ def _validate_optimized_routing(
     if not _is_supported_routing_geometry(num_tokens, num_top_k, hidden_dim):
         raise RuntimeError(
             "Unsupported optimized expert-routing geometry. Production requires "
-            "Qwen top-8/hidden-2048 or DeepSeek top-6/hidden-4096 with at most "
-            "32,768 tokens."
+            "Qwen top-8/hidden-2048, Qwen4-Exp top-10/hidden-2560, or DeepSeek "
+            "top-6/hidden-4096 with at most 32,768 tokens."
         )
     if hidden_states.device.type != "cuda":
         raise RuntimeError("Optimized expert routing requires CUDA/ROCm tensors.")

@@ -87,6 +87,7 @@ def confirm(
         target["k"],
         target["n"],
         transposed,
+        experts=len(route_bank[0].group_sizes),
     )
     passed = (
         candidate != baseline

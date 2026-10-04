@@ -31,6 +31,13 @@ from fast_lora import FastGgufLoraLinear, FastLoraLinear, register_fast_lora
 from fast_moe_lora import FastGgufMoeLora, register_fast_moe_lora
 from fast_moe_ranking import configure_fast_moe_ranking
 from fla_tuning import configure_qwen35_fla
+from gdn_bwd_dhu import install as install_gdn_bwd_dhu
+from gdn_bwd_dqkwg import install as install_gdn_bwd_dqkwg
+from gdn_tiled_value_heads import (
+    configure_tiled_value_heads,
+    require_tiled_value_heads,
+)
+from gdn_wu_recompute import install as install_gdn_wu_recompute
 from gguf_dequant_compile import configure_compiled_gguf_dequantize
 from gguf_liger_loss import apply_gguf_liger_fused_linear_cross_entropy
 from qwen3_5_fused_norms import (
@@ -61,10 +68,8 @@ EXPECTED_PACKED_BYTES = 14_216_723_456
 EXPECTED_GGUF_LINEARS = 351
 EXPECTED_EXPERT_MODULES = 40
 EXPECTED_ORDINARY_WRAPPERS = 250
-# 250 ordinary wrappers = 160 attention/MLP projections on the native dense MMQ path plus the 90
-# GatedDeltaNet projections (`in_proj_qkv`, `in_proj_z`, `out_proj`) that keep the generic
-# compiled-dequant base forward.
-EXPECTED_NATIVE_ORDINARY_WRAPPERS = 160
+EXPECTED_GATED_DELTA_NET_LAYERS = 30
+EXPECTED_NATIVE_ORDINARY_WRAPPERS = 250
 EXPECTED_EXPERT_WRAPPERS = 40
 _GGUF_EXPERTS_TYPE = cast(type[Any], GgufExperts)
 TARGET_MODULES = [
@@ -297,6 +302,10 @@ def main() -> None:
     torch.manual_seed(args.seed)
     report["static_configuration"] = {
         "compiled_gguf_dequant": configure_compiled_gguf_dequantize(),
+        "tiled_value_heads": configure_tiled_value_heads(),
+        "gdn_bwd_dhu": install_gdn_bwd_dhu(),
+        "gdn_bwd_dqkwg": install_gdn_bwd_dqkwg(),
+        "gdn_wu_recompute": install_gdn_wu_recompute(),
         "flash_attention": configure_qwen35_flash_attention_2(),
         "fla_cache_entries": configure_qwen35_fla(),
     }
@@ -321,6 +330,9 @@ def main() -> None:
     report["fused_norms"] = configure_qwen35_fused_norms(model)
     require_complete_qwen35_fused_norms(report["fused_norms"])
     report["load_audit"] = audit_loaded_model(model, loading_info)
+    report["tiled_value_heads"] = require_tiled_value_heads(
+        model, expected_gdn_layers=EXPECTED_GATED_DELTA_NET_LAYERS
+    )
     report["memory_after_load"] = memory_snapshot()
     persist()
 

@@ -16,6 +16,7 @@ HASH_SEED_OFFSET = 31_000
 
 class ExpertPrior(str, Enum):
     QwenLearned = "qwen-learned"
+    Qwen38Learned = "qwen3.8-learned"
     DeepSeekLearned = "deepseek-learned"
     DeepSeekHash = "deepseek-hash"
 
@@ -45,6 +46,7 @@ class LearnedLaw:
     alpha: tuple[float, float, float]
     active_residual: Residual
     alpha_residual: Residual
+    experts: int = EXPERTS
 
 
 QWEN_LEARNED = LearnedLaw(
@@ -65,9 +67,25 @@ DEEPSEEK_LEARNED = LearnedLaw(
     Residual(33.5987235964, -0.0013194870, 0.8328268568, -1.6829685257, 2.7587218851),
     Residual(5.1551932778, -0.0071110386, 0.0923527684, -0.3180690433, 0.3604795507),
 )
+QWEN38_LEARNED = LearnedLaw(
+    10,
+    20.7163112483,
+    1.1946652586,
+    (0.7076361999, 0.9702739281),
+    (0.7505135414, -0.0229817472, -0.2302367069),
+    Residual(7.4647474580, 0.0130546014, 0.4915605168, -1.4935692978, 1.9212931553),
+    Residual(8469463127.5627, 0.0002737558, 0.0870558989, -0.2081819082, 0.2166008918),
+    experts=512,
+)
 LEARNED_LAWS = {
     ExpertPrior.QwenLearned: QWEN_LEARNED,
+    ExpertPrior.Qwen38Learned: QWEN38_LEARNED,
     ExpertPrior.DeepSeekLearned: DEEPSEEK_LEARNED,
+}
+LEARNED_FAMILIES = {
+    ExpertPrior.QwenLearned: "qwen",
+    ExpertPrior.Qwen38Learned: "qwen3.8",
+    ExpertPrior.DeepSeekLearned: "deepseek",
 }
 HASH_COEFFICIENTS = {
     "mu_rho": 0.076568603515625,
@@ -115,6 +133,11 @@ def expert_prior_top_k(value: str | ExpertPrior) -> int:
     return LEARNED_LAWS[prior].top_k if prior in LEARNED_LAWS else 6
 
 
+def expert_prior_experts(value: str | ExpertPrior) -> int:
+    prior = parse_expert_prior(value)
+    return LEARNED_LAWS[prior].experts if prior in LEARNED_LAWS else EXPERTS
+
+
 def expert_prior_metadata(value: str | ExpertPrior) -> dict[str, object]:
     prior = parse_expert_prior(value)
     if prior is ExpertPrior.DeepSeekHash:
@@ -123,6 +146,7 @@ def expert_prior_metadata(value: str | ExpertPrior) -> dict[str, object]:
             "family": "deepseek",
             "router_kind": "hash",
             "top_k": 6,
+            "experts": EXPERTS,
             "coefficients": dict(HASH_COEFFICIENTS),
         }
     law = LEARNED_LAWS[prior]
@@ -138,9 +162,10 @@ def expert_prior_metadata(value: str | ExpertPrior) -> dict[str, object]:
 
     return {
         "law": prior.value,
-        "family": "qwen" if prior is ExpertPrior.QwenLearned else "deepseek",
+        "family": LEARNED_FAMILIES[prior],
         "router_kind": "learned",
         "top_k": law.top_k,
+        "experts": law.experts,
         "coefficients": {
             "shift": law.shift,
             "head_multiplier": law.head_multiplier,
@@ -200,11 +225,12 @@ def _active_curve(law: LearnedLaw, active: int, alpha: float) -> np.ndarray:
 def _sample_learned(
     law: LearnedLaw, tokens: int, rng: np.random.Generator
 ) -> np.ndarray:
+    experts = law.experts
     x = math.log(tokens / REFERENCE_TOKENS)
     active_residual = law.active_residual.sample(rng)
     active_logit = law.active[0] + law.active[1] * x + active_residual
-    active = int(np.rint(257.0 / (1.0 + math.exp(-active_logit)) - 0.5))
-    active = min(EXPERTS, max(law.top_k, active))
+    active = int(np.rint((experts + 1.0) / (1.0 + math.exp(-active_logit)) - 0.5))
+    active = min(experts, max(law.top_k, active))
     alpha_residual = law.alpha_residual.sample(rng)
     alpha = math.exp(
         law.alpha[0]
@@ -217,8 +243,8 @@ def _sample_learned(
         law.top_k * tokens,
         upper=tokens,
     )
-    rows = np.zeros(EXPERTS, dtype=np.int64)
-    rows[rng.permutation(EXPERTS)[:active]] = ranked
+    rows = np.zeros(experts, dtype=np.int64)
+    rows[rng.permutation(experts)[:active]] = ranked
     return rows
 
 
@@ -245,7 +271,8 @@ def sample_expert_profile(
         else _sample_hash(tokens, rng)
     )
     top_k = expert_prior_top_k(prior)
-    if rows.shape != (EXPERTS,) or int(rows.sum()) != top_k * tokens:
+    experts = expert_prior_experts(prior)
+    if rows.shape != (experts,) or int(rows.sum()) != top_k * tokens:
         raise RuntimeError("fitted expert profile violates its row contract")
     if np.any(rows < 0) or np.any(rows > tokens):
         raise RuntimeError("fitted expert profile violates physical token bounds")
