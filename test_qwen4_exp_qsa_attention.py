@@ -322,14 +322,59 @@ def test_qsa_backward_gluon_owner_matches_triton() -> None:
 
 
 def test_qsa_backward_gluon_owner_handles_padding() -> None:
-    """With right padding the two owners must still agree on every valid row."""
-    key_end_value, gluon, triton = _gluon_and_triton_owners(1, 1234)
+    """With right padding the two owners must still agree, padded rows included."""
+    _key_end_value, gluon, triton = _gluon_and_triton_owners(1, 1234)
     for name, got, want in zip(("dQ", "dK", "dV"), gluon[:3], triton[:3]):
-        valid = (slice(None), slice(None), slice(0, key_end_value), slice(None))
-        difference = (got.float()[valid] - want.float()[valid]).abs().max()
-        assert difference <= 1e-4, (
-            f"{name} differs by {float(difference)} on the valid rows"
-        )
+        difference = (got.float() - want.float()).abs().max()
+        assert difference <= 1e-4, f"{name} differs by {float(difference)}"
+
+
+@pytest.mark.parametrize("triton_owner", [False, True])
+def test_qsa_backward_padding_rows_are_zero(triton_owner: bool) -> None:
+    """Padded positions leave the backward as zeros, not as recycled allocation.
+
+    The dK/dV owners hold exactly zero for keys past `key_end`, and the outputs arrive uninitialized,
+    so a store masked to the visible keys would leave whatever the allocator last held in the
+    gradient at padded positions. A full-length backward runs first on purpose: it fills the
+    same-size workspaces with non-zero values, which the padded run then reuses, so a fresh process's
+    zeroed pages cannot hide the difference.
+    """
+    key_end_value = 1234
+    key_end = torch.full((4,), key_end_value, dtype=torch.int32, device="cuda")
+    full_key_end = torch.full((4,), _SEQUENCE_LENGTH, dtype=torch.int32, device="cuda")
+    query, key, value, _, _ = _inputs(4, seed=11, key_end=key_end)
+    output, softmax_lse = _qsa_forward(query, key, value, None, key_end)
+    full_output, full_lse = _qsa_forward(query, key, value, None, full_key_end)
+    upstream = torch.randn(
+        4, _SEQUENCE_LENGTH, _QUERY_FEATURES, dtype=torch.bfloat16, device="cuda"
+    )
+    override = dict(_BACKWARD_CONFIGS[4]["dkdv"]) if triton_owner else None
+    _qsa_backward(
+        query,
+        key,
+        value,
+        full_output,
+        upstream,
+        full_lse,
+        full_key_end,
+        dkdv_override=override,
+    )
+    upstream = upstream.clone()
+    upstream[:, key_end_value:] = 0
+    dquery, dkey, dvalue, _ = _qsa_backward(
+        query,
+        key,
+        value,
+        output,
+        upstream,
+        softmax_lse,
+        key_end,
+        dkdv_override=override,
+    )
+    padding = (slice(None), slice(None), slice(key_end_value, None), slice(None))
+    for name, gradient in (("dQ", dquery), ("dK", dkey), ("dV", dvalue)):
+        magnitude = float(gradient.float()[padding].abs().max())
+        assert magnitude == 0.0, f"{name} has {magnitude} on padded rows"
 
 
 def test_qsa_backward_matches_reference_gradients() -> None:

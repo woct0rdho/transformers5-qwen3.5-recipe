@@ -816,14 +816,22 @@ def _qsa_dkdv_kernel(
             )
             dkey = tl.dot(tl.trans(dscore).to(tl.bfloat16), query, acc=dkey)
 
+    # Keys past `key_end` are padded positions that no visible query attends to, so both accumulators
+    # hold exactly zero there (the score masks above zero every such entry). They still have to be
+    # stored: the outputs arrive uninitialized (`torch.empty_like` in `_qsa_backward`, and the split
+    # workspace through the reduction kernel's own unmasked store), so a store masked to the visible
+    # keys leaves whatever the allocator last held in the gradient at padded positions, and that
+    # recycled value is then carried down the whole stack. The bound below is the sequence, not
+    # `key_end`, which writes those zeros and changes no other row.
+    sequence_rows = (offs_n < SEQUENCE_LENGTH)[:, None]
     if SPLIT == 1:
-        tl.store(dkey_ptr + key_offsets, dkey, mask=key_in_range[:, None])
-        tl.store(dvalue_ptr + value_offsets, dvalue, mask=key_in_range[:, None])
+        tl.store(dkey_ptr + key_offsets, dkey, mask=sequence_rows)
+        tl.store(dvalue_ptr + value_offsets, dvalue, mask=sequence_rows)
     else:
         # Partial sums go to a workspace the reduction kernel owns. dkey_ptr is its base.
         partial_offsets = key_offsets + split_index * PARTIAL_SPLIT_STRIDE
-        tl.store(dkey_ptr + partial_offsets, dkey, mask=key_in_range[:, None])
-        tl.store(dvalue_ptr + partial_offsets, dvalue, mask=key_in_range[:, None])
+        tl.store(dkey_ptr + partial_offsets, dkey, mask=sequence_rows)
+        tl.store(dvalue_ptr + partial_offsets, dvalue, mask=sequence_rows)
 
 
 @triton.jit
@@ -837,17 +845,26 @@ def _qsa_dkdv_reduce_kernel(
     stride_km,
     stride_kd,
     stride_sb,
+    key_end_ptr,
     BLOCK_N: tl.constexpr,
     HEAD_DIM: tl.constexpr,
     SPLIT: tl.constexpr,
     SPLIT_STRIDE: tl.constexpr,
 ):
-    """Sum the SPLIT partial dK/dV tiles in a fixed order, then store them as BF16."""
+    """Sum the SPLIT partial dK/dV tiles in a fixed order, then store them as BF16.
+
+    Keys past `key_end` are padded positions: the owner kernels leave them out of the partials, so the
+    rows they cover hold recycled memory, which is why they are replaced by zero before the store
+    rather than summed into the gradient. Selecting with `tl.where` also discards a non-finite
+    recycled value instead of propagating it, which a masked accumulate would not.
+    """
     key_tile = tl.program_id(0).to(tl.int32)
     kv_head = tl.program_id(1).to(tl.int32)
     batch = tl.program_id(2).to(tl.int32)
     offs_n = key_tile * BLOCK_N + tl.arange(0, BLOCK_N)
     offs_d = tl.arange(0, HEAD_DIM)
+    key_end = tl.load(key_end_ptr + batch)
+    key_in_range = (offs_n < key_end)[:, None]
     base = (
         batch * stride_kb
         + kv_head * stride_kh
@@ -860,8 +877,8 @@ def _qsa_dkdv_reduce_kernel(
         offset = base + split * SPLIT_STRIDE
         dkey += tl.load(partial_key_ptr + offset)
         dvalue += tl.load(partial_value_ptr + offset)
-    tl.store(dkey_ptr + base, dkey)
-    tl.store(dvalue_ptr + base, dvalue)
+    tl.store(dkey_ptr + base, tl.where(key_in_range, dkey, 0.0))
+    tl.store(dvalue_ptr + base, tl.where(key_in_range, dvalue, 0.0))
 
 
 def _backward_config(
@@ -1022,6 +1039,7 @@ def _qsa_backward(
             dkey.stride(2),
             dkey.stride(3),
             partial_key.stride(0),
+            key_end,
             BLOCK_N=owner_block_n,
             HEAD_DIM=_HEAD_DIM,
             SPLIT=split,
@@ -1059,7 +1077,10 @@ def qwen4_exp_qsa_attention_autograd(
 
     `key_end` is `[B]` int32 and caps the visible keys per sample. The default is the full sequence.
     Pad rows are expected to carry no loss, which is what the collator's masked labels give them, so
-    their incoming gradient is zero and the backward skips their contribution.
+    their incoming gradient is zero and the backward skips their contribution. Skipping it means the
+    padded positions of dK and dV are exactly zero, and zero is what the backward has to leave there:
+    those outputs arrive uninitialized, so the owner kernel stores the zeros itself where it writes
+    the gradient directly, and the split workspace's reduction kernel zeroes them as it sums.
     """
     key_end = _validate_inputs(query, key, value, None, key_end)
     return _QsaAttentionFunction.apply(query, key, value, key_end)
