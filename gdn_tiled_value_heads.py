@@ -22,6 +22,11 @@ This module keeps the file's order end to end instead:
 `in_proj_a` and `in_proj_b` keep the compiled-dequant base: they are small, and their reorder was never
 a layout obstacle.
 
+The tiled order is a training-time choice, so it must not leak into checkpoints: an adapter factor on
+this axis saved tiled makes `convert_lora_to_gguf.py` permute it a second time. `gdn_stock_checkpoints`
+owns that boundary and is what the training script installs next to this patch, writing adapter weights
+and `optimizer.pt` in transformers' grouped order and permuting them back on `resume_from_checkpoint`.
+
 The module patches classes and one loader function, so `configure_tiled_value_heads` has to run before
 the model is loaded.
 """

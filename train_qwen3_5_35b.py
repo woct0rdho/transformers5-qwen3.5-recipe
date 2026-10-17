@@ -30,6 +30,7 @@ from fast_moe_ranking import configure_fast_moe_ranking
 from fla_tuning import configure_qwen35_fla
 from gdn_bwd_dhu import install as install_gdn_bwd_dhu
 from gdn_bwd_dqkwg import install as install_gdn_bwd_dqkwg
+from gdn_stock_checkpoints import configure_stock_checkpoint_layout
 from gdn_tiled_value_heads import configure_tiled_value_heads
 from gdn_wu_recompute import install as install_gdn_wu_recompute
 from gguf_dequant_compile import configure_compiled_gguf_dequantize
@@ -65,6 +66,8 @@ def main():
     configure_compiled_gguf_dequantize()
     configure_qwen35_fla()
     configure_qwen35_flash_attention_2()
+    # Checkpoints keep transformers' value-head layout while the model keeps the file's tiled order.
+    configure_stock_checkpoint_layout()
     configure_tiled_value_heads()
     install_gdn_bwd_dhu()
     install_gdn_bwd_dqkwg()

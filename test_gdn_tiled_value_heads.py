@@ -153,7 +153,7 @@ def test_tiled_convention_gradients_flow() -> None:
 def test_loader_drops_exactly_the_value_reorders() -> None:
     configure_tiled_value_heads()
     config = _config()
-    config.get_text_config = lambda: config  # type: ignore[attr-defined]
+    config.get_text_config = lambda: config
 
     def operations(mapping: list[Any]) -> list[str]:
         return [

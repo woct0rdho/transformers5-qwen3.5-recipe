@@ -113,7 +113,7 @@ def test_configure_and_gate_on_a_real_indexer() -> None:
     )
     indexer = Qwen4ExpTextQSAIndexer(config, layer_idx=3)
     parent = torch.nn.Module()
-    parent.indexer = indexer  # type: ignore[assignment]
+    parent.indexer = indexer
 
     report = configure_qwen4_exp_indexer_fast_path(parent)
     assert report["indexers"] == 1

@@ -421,7 +421,6 @@ class FastGgufMoeLora(TorchModule, LoraLayer):
             raise TypeError(
                 f"Fast GGUF MoE LoRA requires GgufExperts, got {type(module).__name__}."
             )
-        module = cast(Any, module)
         return int(module.hidden_dim), 2 * int(module.intermediate_dim)
 
     def __init__(
@@ -471,7 +470,7 @@ class FastGgufMoeLora(TorchModule, LoraLayer):
                 "Fast GGUF MoE LoRA does not support DoRA or aLoRA variants."
             )
 
-        experts = cast(Any, self.get_base_layer())
+        experts = self.get_base_layer()
         if not isinstance(experts, _GGUF_EXPERTS_TYPE):
             raise TypeError(
                 f"Fast GGUF MoE LoRA requires GgufExperts, got {type(experts).__name__}."
