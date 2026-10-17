@@ -1,7 +1,7 @@
 """Shared Kineto reporting for architecture-specific full-step audits."""
 
 import json
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -55,7 +55,7 @@ def lora_module_category(
 @contextmanager
 def module_ranges(
     model: torch.nn.Module, categorize: ModuleCategorizer
-) -> Iterator[None]:
+) -> Generator[None]:
     """Annotate selected module forwards with architecture-owned categories."""
 
     handles: list[Any] = []

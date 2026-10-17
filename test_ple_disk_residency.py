@@ -27,6 +27,7 @@ from ple_disk_residency import (
     _PleDiskSource,
     placeholder_for,
 )
+from torch_typing import TorchModule
 
 _ROWS = 512
 _COLUMNS = 160
@@ -308,7 +309,7 @@ def test_a_wrong_prediction_is_ignored(tmp_path) -> None:
     assert np.array_equal(gathered.numpy(), expected)
 
 
-class _IdRecorder(torch.nn.Module):
+class _IdRecorder(TorchModule):
     """Stands in for the PLE embedding and keeps the row ids the layer computed for it."""
 
     def __init__(self, rows: int, dim: int):

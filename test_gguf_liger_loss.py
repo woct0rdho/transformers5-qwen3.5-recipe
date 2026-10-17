@@ -27,6 +27,7 @@ from gguf_liger_loss import (
     gguf_liger_lce_forward,
 )
 from packed_liger_loss import PackedLossResult
+from torch_typing import TorchModule
 
 _MODEL = Path(
     os.environ.get(
@@ -227,7 +228,7 @@ def test_packed_q8_liger_loss_rejects_higher_order_gradients(
         torch.autograd.grad(loss, hidden, create_graph=True)
 
 
-class _StubInnerModel(torch.nn.Module):
+class _StubInnerModel(TorchModule):
     def __init__(self, hidden_states: torch.Tensor) -> None:
         super().__init__()
         self.hidden_states = hidden_states

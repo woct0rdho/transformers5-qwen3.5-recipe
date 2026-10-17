@@ -16,6 +16,7 @@ from transformers.integrations.gguf.modules import GgufLinear
 from fast_lora import FastGgufLoraLinear, register_fast_lora
 from gguf_support import dequantize_gguf_tensor
 from test_support import require_grad
+from torch_typing import TorchModule
 
 _MODEL = Path(
     os.environ.get(
@@ -47,7 +48,7 @@ def test_fast_lora_keeps_original_bf16_input_and_exact_base_jacobian() -> None:
         logical_shape=(out_features, 2048),
     )
 
-    class Toy(torch.nn.Module):
+    class Toy(TorchModule):
         def __init__(self) -> None:
             super().__init__()
             self.proj = GgufLinear(
@@ -202,7 +203,7 @@ def test_fast_lora_gdn_projections_take_the_native_base(
         logical_shape=(out_features, in_features),
     )
 
-    class LinearAttention(torch.nn.Module):
+    class LinearAttention(TorchModule):
         def __init__(self) -> None:
             super().__init__()
             module = GgufLinear(
@@ -219,7 +220,7 @@ def test_fast_lora_gdn_projections_take_the_native_base(
         def forward(self, input: torch.Tensor) -> torch.Tensor:
             return getattr(self, leaf)(input)
 
-    class Toy(torch.nn.Module):
+    class Toy(TorchModule):
         def __init__(self) -> None:
             super().__init__()
             self.linear_attn = LinearAttention()

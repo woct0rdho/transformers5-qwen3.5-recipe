@@ -27,7 +27,7 @@ the model is loaded.
 """
 
 import contextlib
-from collections.abc import Iterator
+from collections.abc import Generator
 from typing import Any
 
 import torch
@@ -123,7 +123,7 @@ def _tiled_repeat_interleave(self, repeats, dim=None, *, output_size=None):
 
 
 @contextlib.contextmanager
-def _tiled_scope(module: torch.nn.Module) -> Iterator[None]:
+def _tiled_scope(module: torch.nn.Module) -> Generator[None]:
     previous = _STATE["module"]
     _STATE["module"] = module
     try:
@@ -133,7 +133,7 @@ def _tiled_scope(module: torch.nn.Module) -> Iterator[None]:
 
 
 @contextlib.contextmanager
-def grouped_broadcast() -> Iterator[None]:
+def grouped_broadcast() -> Generator[None]:
     """Run one forward with the loader's grouped pairing, to compare against the tiled convention."""
 
     previous = _STATE["enabled"]

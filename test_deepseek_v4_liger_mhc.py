@@ -22,6 +22,7 @@ from deepseek_v4_liger_mhc import (
     require_complete_deepseek_v4_liger_mhc,
 )
 from test_support import assert_close_mixed_precision, require_grad
+from torch_typing import TorchModule
 
 _HC = 4
 _HIDDEN = 4096
@@ -354,12 +355,12 @@ def test_mhc_boundaries_survive_non_reentrant_checkpoint() -> None:
     assert branch.grad is not None and torch.isfinite(branch.grad).all()
 
 
-class _ToyAttention(torch.nn.Module):
+class _ToyAttention(TorchModule):
     def forward(self, hidden_states: torch.Tensor, **_kwargs):
         return hidden_states * 0.25, None
 
 
-class _ToyMLP(torch.nn.Module):
+class _ToyMLP(TorchModule):
     def forward(
         self,
         hidden_states: torch.Tensor,

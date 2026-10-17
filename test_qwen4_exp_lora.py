@@ -26,6 +26,7 @@ from qwen4_exp_lora import (
     require_complete_qwen4_exp_frozen_mmq,
 )
 from test_support import require_grad
+from torch_typing import TorchModule
 
 _OUT_FEATURES = 2560
 _IN_FEATURES = 640
@@ -68,7 +69,7 @@ class _PleSite(torch.nn.Module):
         self.key_proj = key_proj
 
 
-class _PleToy(torch.nn.Module):
+class _PleToy(TorchModule):
     """One frozen site under the name the patch matches."""
 
     def __init__(self, key_proj: GgufLinear) -> None:

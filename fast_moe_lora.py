@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from typing import Any, cast
 
 import torch
-from aiter.ops.triton.gmm import gmm, ptgmm
+from aiter.ops.triton.gemm.grouped.gmm import gmm, ptgmm
 from peft import LoraConfig
 from peft.tuners.lora.layer import LoraLayer
 from torch_ggml_ops import grouped_mmq, grouped_mmq_pair
@@ -37,6 +37,7 @@ from transformers.integrations.gguf.moe import ALL_GGUF_EXPERTS_FUNCTIONS, GgufE
 from fast_moe_routing import finalize_expert_routing, prepare_expert_routing
 from moe_gmm_configs import gmm_config as _gmm_config
 from moe_gmm_configs import ptgmm_config as _ptgmm_config
+from torch_typing import TorchModule
 
 QWEN3_5_MOE_EXPERTS_IMPLEMENTATION = "qwen3_5_moe_gguf_mmq_aiter_lora"
 _LORA_WEIGHTS_KWARG = "_gguf_moe_lora_weights"
@@ -409,7 +410,7 @@ def _prepare_packed_expert_execution(
     return expert_ids, group_sizes.cumsum(0, dtype=torch.int32), group_sizes
 
 
-class FastGgufMoeLora(torch.nn.Module, LoraLayer):
+class FastGgufMoeLora(TorchModule, LoraLayer):
     """PEFT LoRA wrapper owning all factors for one packed `GgufExperts` module."""
 
     adapter_layer_names = ("lora_A", "lora_B", "lora_A_down", "lora_B_down")

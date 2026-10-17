@@ -22,6 +22,7 @@ from deepseek_v4_lora import (
     require_complete_deepseek_v4_grouped_mmq,
 )
 from test_support import require_grad
+from torch_typing import TorchModule
 
 _MODEL = Path(
     os.environ.get(
@@ -72,7 +73,7 @@ def test_q8_0_ordinary_lora_uses_native_base_and_fused_residual() -> None:
         np.array(tensor.data, dtype=np.uint8, copy=True, order="C")
     ).to("cuda")
 
-    class Toy(torch.nn.Module):
+    class Toy(TorchModule):
         def __init__(self) -> None:
             super().__init__()
             self.q_a_proj = GgufLinear(

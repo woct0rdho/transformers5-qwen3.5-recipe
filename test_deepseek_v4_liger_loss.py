@@ -24,6 +24,7 @@ from deepseek_v4_liger_loss import (
 )
 from packed_liger_loss import PackedLossResult
 from test_support import require_grad
+from torch_typing import TorchModule
 
 _MODEL = Path(
     os.environ.get(
@@ -53,7 +54,7 @@ def _q8_lm_head(weight: np.ndarray) -> GgufLinear:
     return head
 
 
-class _StubInnerModel(torch.nn.Module):
+class _StubInnerModel(TorchModule):
     def __init__(self, hidden_states: torch.Tensor) -> None:
         super().__init__()
         self.hidden_states = hidden_states

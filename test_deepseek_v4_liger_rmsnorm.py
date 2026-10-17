@@ -15,6 +15,7 @@ from deepseek_v4_liger_rmsnorm import (
 )
 from module_patching import PATCH_MARKER
 from test_support import assert_close_mixed_precision, require_grad
+from torch_typing import TorchModule
 
 _MIN_RMSNORM_COSINE = 0.999
 _MAX_RMSNORM_RELATIVE_RMSE = 0.005
@@ -176,7 +177,7 @@ def test_frozen_weight_function_returns_no_weight_gradient() -> None:
 
 
 def test_base_model_patch_survives_lora_injection() -> None:
-    class Toy(torch.nn.Module):
+    class Toy(TorchModule):
         # `q_a_proj` is a LoRA layer once PEFT has injected the adapter, so the test only needs the
         # module surface here. `LoraLayer` below narrows it back to the adapter.
         q_a_proj: torch.nn.Module

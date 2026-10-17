@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 import torch
-from aiter.ops.triton.gmm import gmm, ptgmm
+from aiter.ops.triton.gemm.grouped.gmm import gmm, ptgmm
 
 from aiter_benchmark_protocol import AdaptiveTimingPolicy, adaptive_pair_timings
 from expert_distribution_prior import (
