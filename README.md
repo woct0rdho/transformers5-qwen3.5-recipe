@@ -41,4 +41,4 @@ Other notes:
 - Unsloth gradient checkpointing provides fast async CPU-GPU copy. You need it if you actually do CPU offload. But on Strix Halo with unified memory you should just use the usual gradient checkpointing
 - When loading large models on Strix Halo, you need pread, see https://github.com/safetensors/safetensors/pull/728
 - When using transformers with GGUF quantizer, you need torch.compile on the GGUF dequant function to save VRAM
-- When inferencing the model with LoRA in llama.cpp, currently llama.cpp does not have a fast LoRA kernel. I've made one, see https://github.com/woct0rdho/llama.cpp/commit/36e9f19a3058cbdc86e824293c0c69ca02ad03ea
+- When inferencing the model with LoRA in llama.cpp, currently llama.cpp does not have fast LoRA kernels. I've made some, see the commit log in https://github.com/woct0rdho/llama.cpp
