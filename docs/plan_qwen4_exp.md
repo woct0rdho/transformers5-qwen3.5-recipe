@@ -4,19 +4,34 @@
 
 One complete rank-4 LoRA update on `Qwen4ExpForCausalLM` from the persistent GGUF checkpoint is the unit this project validates: batch 1, sequence length 2048, the complete model on `cuda:0`, and per-decoder-layer non-reentrant gradient checkpointing.
 
+## Audit and profile
+
 ```bash
-python audit_qwen4_exp_training_step.py --max-steps 3 --report-output ~/tmp/test_no_unsloth/qwen4_exp_training_report.json --profile-output ~/tmp/test_no_unsloth/qwen4_exp_profile.trace.json
+python audit_qwen4_exp_training_step.py \
+  --batch-size 1 --sequence-length 2048 --max-steps 1 --rank 4 --alpha 4 \
+  --report-output ~/tmp/test_no_unsloth/qwen4_exp/audit/qwen4_exp_training_report.json \
+  --profile-output ~/tmp/test_no_unsloth/qwen4_exp/audit/qwen4_exp_training_step_profile.json
 ```
 
-The audit passes on the active checkpoint, `Qwen3.8-Flash-Next-GSQ-RCO-Q2_0.gguf`: 61.93 GiB resident, 448 packed parameters, 64,927,247,360 packed bytes, and 699,678,720 trainable parameters in 792 BF16 adapter tensors across 348 wrapped modules. Its report defaults to `qwen4_training_report.json` in the working directory, and the accepted runs write `~/tmp/test_no_unsloth/qwen4_exp_training_report.json`. Temporary scripts, artifacts and profiles for this project live in `~/tmp/test_no_unsloth/`.
+`--profile-output` names the profile report. The Kineto trace is written beside it as `qwen4_exp_training_step_profile.trace.json`. All three canonical commands use `--max-steps 1`. The profile's warm-up and traced updates are the measurement. A separate warm validation run is under `audit/validation/`. The accepted report, profile and trace are under `audit/accepted/`.
 
-One complete update costs 9.31 s: 2.67 s forward, 6.50 s backward, 0.03 s gradient clipping and 0.11 s of the optimizer step, and the two warm steps agree to 3 ms. The load costs 22.6 s, and the first forward of a fresh process costs 4.01 s against the 2.67 s of a warm one, because it still carries the compiled dequantizer's remaining shape specializations.
+Artifacts:
+- current gate report: `~/tmp/test_no_unsloth/qwen4_exp/audit/qwen4_exp_training_report.json`.
+- current profile report and trace: `~/tmp/test_no_unsloth/qwen4_exp/audit/qwen4_exp_training_step_profile.json` and `.trace.json`.
+- accepted report/profile/trace: `~/tmp/test_no_unsloth/qwen4_exp/audit/accepted/qwen4_final_report.json` and `qwen4_final_profile.json` / `.trace.json`.
+- warm validation report: `~/tmp/test_no_unsloth/qwen4_exp/audit/validation/qwen4_training_report_warm_validation.json`.
+- light-profile runs and backups: `~/tmp/test_no_unsloth/qwen4_exp/profiles/`.
+- QSA launch screen: `~/tmp/test_no_unsloth/qwen4_exp/bench/qsa_bwd_current.json`.
 
-Memory is 61.93 GiB resident after load, 63.31 GiB with the adapters, and a 67.51 GiB allocated / 68.99 GiB reserved peak across the measured steps in the machine's 125 GiB pool, with 5.27 GiB of process RSS and no swap. An opt-in mode keeps the PLE n-gram table in the GGUF file instead of device memory: `audit_qwen4_exp_training_step.py --ple-on-disk` runs the same update in 9.305 and 9.312 s with 35.10 GiB resident after load, 39.15 GiB allocated after the measured steps and a 40.69 GiB peak, which is what brings this step under 40 GiB of live allocation.
+The current audit passes on the active checkpoint, `Qwen3.8-Flash-Next-GSQ-RCO-Q2_0.gguf`: 61.85 GiB resident after load, 448 packed parameters, 64,927,247,360 packed bytes, and 699,678,720 trainable parameters in 792 BF16 adapter tensors across 348 wrapped modules. The current command runs torch `2.15.0+rocm10.3.0a20261101` / HIP `7.18.26434` / Triton `3.9.0`. The accepted baseline ran torch `2.14.0+rocm10.2.0a20261003` / HIP `7.17.26392`.
 
-The GatedDeltaNet kernel round is wired end to end: `gdn_bwd_dhu.py`, `gdn_bwd_dqkwg.py` and `gdn_wu_recompute.py` replace three FLA kernels at their call sites and are worth 0.83 s of the update, 10.14 s to 9.31 s, with the allocation unchanged.
+One complete update currently costs 9.62 s: 2.75 s forward, 6.75 s backward, 0.03 s gradient clipping and 0.11 s of the optimizer step. The accepted 10.2 baseline was 9.31 s, so the current re-audit is 3.3% slower. Two independent warm validation updates were 9.6176 and 9.6179 s. The load is I/O- and cache-sensitive at 24.98-25.88 s. The first update is compile-cache-sensitive at 10.14-10.34 s and is not used as a speed result.
 
-No family dominates any more. The routed experts, the GatedDeltaNet family and the hyper-connections are the top three at 2.90 s, 1.99 s and 1.34 s, and the attribution table below is the measured order.
+Memory is 61.85 GiB resident after load, 63.15 GiB with the adapters, and a 67.34 GiB allocated / 68.39 GiB reserved peak in the machine's 124.0 GiB pool, with 5.26 GiB of process RSS after the measured steps and no process swap. The PLE-on-disk mode was not rerun in this 10.3 audit. Its accepted measurement took the step under 40 GiB.
+
+The accepted 10.2 baseline's GatedDeltaNet kernel round is still the reference for that optimization: `gdn_bwd_dhu.py`, `gdn_bwd_dqkwg.py` and `gdn_wu_recompute.py` replaced three FLA kernels and took the update from 10.14 s to 9.31 s. The current 10.3 re-audit keeps them installed but measures the GatedDeltaNet family at 2.08 s, with `chunk_bwd_kernel_dqkwg` at 370.7 ms against the accepted 299.7 ms. That is a launch/FLA-0.6 retune question, not a reason to remove the replacements.
+
+No family dominates any more, but the current order has moved. Routed experts are still first at about 2.91 s, the GatedDeltaNet family is second at about 2.08 s, and hyper-connections are about 1.33 s. QSA attention is about 0.64 s, up from 0.52 s, and its dQ kernel is the largest single regression in the current profile.
 
 Future optimization must preserve the production contract: packed GGUF payloads stay the only base-weight representation, adapters stay rank-4 BF16 with ordinary PEFT names, the complete model stays on `cuda:0`, checkpointing stays non-reentrant and verified on all 48 layers, and unsupported geometry fails closed rather than falling back silently.
 
@@ -29,17 +44,21 @@ Future optimization must preserve the production contract: packed GGUF payloads 
 | Routed experts on the shared grouped-MMQ base with AITER factors | Complete |
 | Packed LM-head loss | Complete |
 | Router selection on the shared streaming kernel | Complete |
-| QSA attention and the indexer fast path | Complete |
+| QSA attention and the indexer fast path | Complete. dQ launch retune pending |
 | Fused norms (plain, gated, grouped) | Complete |
 | Hyper-connection fused norm | Complete |
 | GatedDeltaNet value-head convention and native `out_proj` | Complete |
-| GatedDeltaNet kernel replacements (walk, `dqkwg`, W/U) | Complete and wired |
+| GatedDeltaNet kernel replacements (walk, `dqkwg`, W/U) | Complete and wired. `dqkwg` retune pending |
 | GatedDeltaNet fused preparation | Written and tested, not wired |
 | PLE table on disk (opt-in) | Complete and measured |
 | llama.cpp adapter export for this surface | Complete |
+| Current ROCm 10.3 / Triton 3.9 B1 re-audit | Complete. 9.62 s, 3.3% above accepted |
+| Triton 3.9 launch retune (QSA dQ, GDN `dqkwg`) | Pending |
 | Physical B4 and B16 full update | Pending |
 
-The production stack is assembled and accepted at physical B1/S2048. What is left is attribution-driven work inside `torch-ggml-ops` and in the model rather than new wiring: the routed experts' paired `Q2_0` forward body, the residual-stream arithmetic the decoder layer owns, the hyper-connection elementwise chain, and the fused preparation's 6.3 GiB of saved state, which is why it is written but disconnected. Memory is a solved question at the model's own size: the PLE table can move to the file, which takes the step under 40 GiB, and what remains resident is the 31.6 GiB of routed experts, which every step reads in full.
+The production stack is assembled and accepted at physical B1/S2048 on the 10.2 baseline. The current 10.3 / Triton 3.9 re-audit passes every gate but is 3.3% slower. The additional time is concentrated in QSA's dQ launch (about 0.11 s), the GatedDeltaNet `dqkwg` path (about 0.10 s), and smaller AITER/router/hyper-connection costs, partly offset by a lower PLE cost. The packed-MMQ base, grouped-MMQ base, ordinary projections and elementwise kernels are flat.
+
+What is left is attribution-driven work inside `torch-ggml-ops` and in the model rather than new wiring: the routed experts' paired `Q2_0` forward body, the residual-stream arithmetic the decoder layer owns, the hyper-connection elementwise chain, and the fused preparation's 6.3 GiB of saved state, which is why it is written but disconnected. Memory is a solved question at the model's own size: the PLE table can move to the file, which takes the step under 40 GiB, and what remains resident is the 31.6 GiB of routed experts, which every step reads in full.
 
 A physical B4 then B16 full update is the next milestone. The kernels and their isolated measurements already cover both.
 
@@ -155,94 +174,65 @@ Two of the frozen sites above still get native kernels, because they are execute
 - Unsupported architecture, batch, sequence length, layout, dtype, mask, cache or grouped-GEMM shape falls closed to the model's own path or is rejected.
 - The real project dataset is not scanned, aggregated, regenerated or rewritten without explicit approval.
 
-## Latest accepted results
+## Latest measured results
 
-### Full-model update
+The current canonical command uses `--max-steps 1` on torch `2.15.0+rocm10.3.0a20261101` / HIP `7.18.26434` / Triton `3.9.0`. The ROCm 10.2 accepted total and the optimization A/B numbers are retained only for comparison.
 
-The authoritative model-level boundary is physical B1/S2048 with 48 non-reentrant decoder checkpoints, measured on torch `2.14.0+rocm10.2.0a20261003` / HIP `7.17.26392`.
+### Full-model B1 update
 
-| Phase | First update | Second update | Warm update |
-| --- | ---: | ---: | ---: |
-| load | 22.58 s | - | - |
-| adapter injection | 0.27 s | - | - |
-| optimizer create | 0.01 s | - | - |
-| forward | 4.01 s | 2.71 s | 2.67 s |
-| backward | 6.87 s | 6.50 s | 6.51 s |
-| gradient clipping | 0.08 s | - | 0.03 s |
-| optimizer step | 0.14 s | - | 0.11 s |
-
-The load, the adapter injection and the optimizer creation are one-time costs and are not part of an update: the first update totals 11.10 s and the warm update 9.31 s. The losses of the measured updates are `3.4914` and `3.4869`, and the clipping norms before the first update and in the two measured ones are `0.2754`, `0.2832` and `0.3301`.
-
-The first update is the slow one, at 11.10 s, because it carries the compiled dequantizer's autotune. The second measures 9.22 s of forward and backward (it runs no clipping or optimizer step) and the two warm steps after it 9.31 s including both.
-
-The traced update now completes as well. It was OOM-killed before the indexer fast path, because the indexer's 2048-iteration Python loop alone produced 3,265,884 of the step's ~3.6 million profiler events. With the attention wiring skipping the indexer call, the trace exports at 104 MB:
+The current re-audit uses physical B1/S2048 with 48 non-reentrant decoder checkpoints. The accepted baseline used torch `2.14.0+rocm10.2.0a20261003` / HIP `7.17.26392` on the same geometry.
 
 | Update | Forward | Backward | Gradient clip | Optimizer | Total |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Warm untraced | 2.669 s | 6.515 s | 30.6 ms | 108.6 ms | 9.323 s |
-| Kineto traced | 2.716 s | 6.567 s | 29.8 ms | 109.6 ms | 9.422 s |
+| Current warm untraced (10.3) | 2.746 s | 6.734 s | 29.6 ms | 107.2 ms | 9.618 s |
+| Current Kineto traced (10.3) | 2.753 s | 6.752 s | 29.9 ms | 109.6 ms | 9.644 s |
 
-The trace is `~/tmp/test_no_unsloth/qwen4_final_profile.trace.json`, written by the audit's `--profile-output`. Its own buffers add about 5 GiB to the process while it is capturing, which is why the profile block's allocation reading (70.85 GiB) is above the untraced peak of 67.51 GiB.
+Two independent warm validation updates were `9.6176` and `9.6179 s`. They confirm the profile warm-up. The current update is 3.3% slower than the accepted baseline. The time is not one kernel: QSA dQ adds about 0.11 s, GatedDeltaNet adds about 0.10 s, and AITER/router/hyper-connection costs add roughly 0.08 s, partly offset by a lower PLE cost. The packed-MMQ, grouped-MMQ, ordinary-projection and elementwise families are flat.
+
+The current first update is cache-sensitive: `10.34 s` in the profile run and `10.14 s` in the warm-cache validation. The first forward is `3.18-3.38 s` against the warm `2.75 s`. The load is also I/O/cache-sensitive at `24.98-25.88 s`. Neither one-time cost is part of the 9.62 s update number.
+
+The current measured losses are `3.490606` and `3.486475`. The current clipping norms are `0.27539`, `0.27903`, `0.27930` and `0.33203` for the first, second, warm and traced updates. The small loss movement from the accepted run is toolchain/router numerics, not a correctness failure.
+
+The current Kineto trace is `~/tmp/test_no_unsloth/qwen4_exp/audit/qwen4_exp_training_step_profile.trace.json` (103 MB). The profile report is the `--profile-output` JSON. The trace is its sibling `.trace.json`.
 
 ### Whole-update attribution
 
-The module-category attribution comes from `~/tmp/test_no_unsloth/qwen4_light_profile.py`, which measures the same module ranges with CUDA events and applies the same configuration calls as the audit. The table is the third step of a `--steps 3 --with-optimizer` run: 2.66 s of forward and 6.48 s of backward, whose 2.37 s of recomputed layer forwards are attributed separately and are not part of the backward column.
+The current 10.3 family totals were remeasured with `~/tmp/test_no_unsloth/qwen4_light_profile.py` under the same wiring plus the Kineto trace for the kernel deltas. The accepted column is retained only to size the regressions.
 
-The categories cover the forward to within 0.20 s, and the backward closes exactly once the recomputation is added back: 4.11 s of backward self plus 2.37 s of recomputation against the 6.48 s wall.
+| Family | Accepted total | Current total | Change |
+| --- | ---: | ---: | ---: |
+| routed experts | 2.902 s | 2.907 s | flat |
+| GatedDeltaNet | 1.986 s | 2.081 s | +4.8% |
+| ordinary projections | 1.485 s | about 1.48 s | flat |
+| hyper-connections | 1.340 s | about 1.32-1.34 s | flat within attribution noise |
+| QSA attention | 0.521 s | 0.643 s | +23% |
 
-| Category | Forward self | Share | Backward self | Share | Recomputed |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| routed experts (grouped MMQ base) | 900.5 ms | 33.8% | 1101.7 ms | 17.0% | 899.8 ms |
-| GatedDeltaNet (norms, conv, kernels, gates. Projections are children) | 416.3 ms | 15.6% | 1152.3 ms | 17.8% | 417.4 ms |
-| ordinary projections (all 300 wrappers) | 503.2 ms | 18.9% | 477.7 ms | 7.4% | 503.7 ms |
-| hyper-connection (fused norm, two projections, gates, mean) | 349.5 ms | 13.1% | 644.3 ms | 9.9% | 346.2 ms |
-| QSA attention (norms, RoPE, kernels, gate) | 69.4 ms | 2.6% | 381.1 ms | 5.9% | 70.9 ms |
-| decoder-layer residual arithmetic (the two injection pairs) | 88.2 ms | 3.3% | 174.4 ms | 2.7% | - |
-| shared expert | 55.1 ms | 2.1% | 65.7 ms | 1.0% | 55.0 ms |
-| PLE layer (with its three grouped norms) | 42.0 ms | 1.6% | 64.2 ms | 1.0% | 40.1 ms |
-| MoE block remainder (gate projection, routing combine) | 32.7 ms | 1.2% | 43.3 ms | 0.7% | 32.9 ms |
-| routed-expert dispatch | 0.2 ms | 0.0% | 0.3 ms | 0.0% | 0.2 ms |
-| PLE n-gram embedding | 0.6 ms | 0.0% | - | - | 0.7 ms |
-| QSA indexer (not called) | 0.0 ms | 0.0% | - | - | 0.0 ms |
-| attributed total | 2.46 s | | 4.11 s | | 2.37 s |
+The QSA change is the current profile's largest single regression. QSA backward is `511.1 ms` against the accepted `381.1 ms`. Forward is `66.2 ms` against `69.4 ms`, and recomputation is `66.1 ms` against `70.9 ms`. Kineto attributes `195.6 ms` to `_qsa_dq_kernel` alone, while `_qsa_dkdv_gluon_kernel` is only `244.9 ms` against `234.6 ms` (+4.4%). The isolated backward screen shows the cause is the launch config: the current dQ seed with `num_stages=2` costs `37.05 ms` per call, while the same config with `num_stages=1` costs `27.93 ms`. Across twelve QSA layers that is about `0.11 s`, which accounts for almost the whole QSA regression.
 
-All 300 ordinary wrappers are one row because every ordinary projection now runs the native dense MMQ base. The QSA indexer row is zero for a structural reason: with the attention wiring in place the indexer is not called at all, so there is nothing left for the fast path to skip at run time. The PLE row is the resident table's. With the table on disk and prefetched it keeps the same forward time, because the gather overlaps the backward, and without the prefetch it absorbs the 0.2-1.6 s the reads cost.
+GatedDeltaNet is the second measured regression. `chunk_bwd_kernel_dqkwg` is `370.7 ms` against `299.7 ms` (+23.7%), `ChunkGatedDeltaRuleFunction` is `665.9` against `615.3 ms`, and `ChunkGatedDeltaRuleFunctionBackward` is `914.1` against `866.6 ms`. The current tree includes the FLA 0.6 launcher/grid change and still uses `NUM_STAGES=2`. This is a retune candidate rather than a removed optimization.
 
-The tree behind the table is built from the measured event windows rather than from the order the hooks fired.
+The rest of the current trace is stable. AITER `gmm_kernel` is `351.1 ms` against `314.8 ms` (+11.5%, +36 ms) and is outside the Triton retune. The grouped-MMQ pair launch is `834.6` against `832.9 ms`, the grouped-MMQ launch is `390.2` against `392.2 ms`, and `aten::mm` is `784.7` against `783.0 ms`. The routed-expert base is flat.
 
-With gradient checkpointing a layer's recomputation runs inside the enclosing backward pass but outside any backward span that is open at the time, so a stack-built tree attaches it to nothing: its wall time was then reported as the enclosing layer's self time while it also appeared in the recomputed bucket, and the decoder layer's backward row read 2.73 s against the 0.26 s of arithmetic actually there. Nesting the spans by their own windows fixes that.
-
-`~/tmp/test_no_unsloth/decompose_qwen4_remainder.py` and `~/tmp/test_no_unsloth/walk_qwen4_span_tree.py` are the probes that showed the inconsistency, and `~/tmp/test_no_unsloth/isolate_qwen4_layer.py` confirms the corrected numbers against a single real layer with checkpointing on and off: the layer's own backward is 3.6 ms, and the recomputation costs exactly one extra forward, 44-57 ms per layer.
+The current light-profile driver is `~/tmp/test_no_unsloth/qwen4_light_profile.py`. Its output is under `~/tmp/test_no_unsloth/qwen4_exp/profiles/`. Its nested self-times are noisy for ordinary, hyper-connection and PLE rows (some child spans overlap or go negative), so the family totals above and the Kineto kernel deltas are authoritative for those rows. `~/tmp/test_no_unsloth/decompose_qwen4_remainder.py`, `~/tmp/test_no_unsloth/walk_qwen4_span_tree.py` and `~/tmp/test_no_unsloth/isolate_qwen4_layer.py` are the probes that established the corrected event-window attribution.
 
 ### Memory
 
-The ROCm-visible device capacity is 125 GiB, and on this APU the GPU's memory is the system RAM itself, so the resident model, the page cache and the training state share one pool.
+The ROCm-visible device capacity is 124.0 GiB.
 
 | Boundary | Allocated | Reserved or free |
 | --- | ---: | ---: |
-| Packed model loaded | 61.93 GiB | 63.63 GiB reserved, 54.73 GiB device free |
-| Adapters injected | 63.31 GiB | 64.89 GiB reserved, 53.43 GiB free |
-| Complete-update peak | 67.51 GiB | 68.99 GiB reserved |
-| After the measured steps | 65.97 GiB | 68.99 GiB reserved, 49.09 GiB free |
+| Packed model loaded | 61.85 GiB | 63.77 GiB reserved, 54.58 GiB free |
+| Adapters injected | 63.15 GiB | 64.71 GiB reserved, 53.59 GiB free |
+| Complete-update peak | 67.34 GiB | 68.39 GiB reserved |
+| After the measured steps | 65.81 GiB | 68.39 GiB reserved, 49.71 GiB free |
 
-The peak is 5.58 GiB above the loaded model and 4.20 GiB above the adapter-injected state. Process RSS is 4.40 GiB after load, 4.47 GiB with the adapters and 5.27 GiB after the updates. `MemAvailable` falls from 52.30 GiB to 46.15 GiB across the run and process swap stays at 0 B throughout.
+The current peak is 5.50 GiB above the loaded model and 4.19 GiB above the adapter-injected state. Process RSS is `5.26 GiB` after the measured steps and `6.58 GiB` at the end of the process. Process swap stays at `0 B`, and `MemAvailable` is `46.04 GiB` after the measured steps.
 
-The same audit with `--ple-on-disk`, which is the mode a smaller machine would run, moves the 26.82 GiB payload into the file:
-
-| Boundary | Allocated | Reserved or free |
-| --- | ---: | ---: |
-| Packed model loaded | 35.10 GiB | 36.81 GiB reserved, 81.53 GiB device free |
-| Adapters injected | 36.49 GiB | 38.07 GiB reserved, 80.23 GiB free |
-| Complete-update peak | 40.69 GiB | 42.17 GiB reserved |
-| After the measured steps | 39.15 GiB | 42.17 GiB reserved, 75.89 GiB free |
-
-That is 26.82 GiB less at every boundary, `MemAvailable` stays above 72.94 GiB, and process RSS is unchanged (4.42, 4.49 and 5.31 GiB). The mode costs 26.82 GiB of memory because the payload is read from the file, not because anything else about the step changed: the audit's inventory still counts the table from the checkpoint header, and the load gets faster rather than slower (10.79 s against 22.58 s), because 28.80 GB is no longer read into the machine only to be copied to the device.
-
-Two facts about the resident table are worth keeping. First, the three GatedDeltaNet replacements change no tensor the step keeps, so the allocation is identical to the state before them. Second, the transition stall that earlier runs showed - 96.6 s and 70.3 s for the update after the first one, with 2.2 GB of swap - was not the model, the kernels or the audit's gates: it was a 34.1 GiB pinned staging block the loader left behind, which on a unified-memory device came out of the same pool as the model and left the allocator to reclaim on the first `optimizer.step()`. Bounding the reader's staging removed it, and `device_free` after load rose from 24.7 GiB to the 54.73 GiB above.
+The PLE-on-disk mode was not rerun in this 10.3 audit. It moves the 26.82 GiB payload into the file and takes the accepted layout to 39.15 GiB allocated with a 40.69 GiB peak. The prefetch overlaps the reads with the step. The resident table facts are unchanged: the three GatedDeltaNet replacements change no tensor the step keeps, so allocation is identical to the state before them, and the earlier transition stall (96.6 s and 70.3 s, with 2.2 GB of swap) was a 34.1 GiB pinned staging block left by the loader, not the model or kernels. Bounding the reader's staging removed it, and `device_free` after load rose from 24.7 GiB to 54.58 GiB in the current run.
 
 ### Audit gates and what they prove
 
-The audit re-derives every quantity below on the active checkpoint and fails closed on any mismatch. The values are the ones the accepted run recorded.
+The audit re-derives every quantity below on the active checkpoint and fails closed on any mismatch. The structural counts and tie counts are from the current run. The pass timings are warm-cache.
 
 | Gate | Acceptance |
 | --- | --- |
@@ -251,7 +241,7 @@ The audit re-derives every quantity below on the active checkpoint and fails clo
 | PLE: one site at layer 1, `[320001536, 160]` IQ4_NL, `requires_grad=False`, payload identity stable across the update | exact |
 | PLE on disk (when asked for): 1 table patched, 0 skipped, the parameter holds no payload, the geometry comes from the header, and the payload identity is sampled from the file | exact, and equal to the resident run's `sha256` |
 | QSA: 12 layers at indices 3..47, budget 2048, compress ratio 4, `block_topk == max_complete_blocks == 512` | selection is exhaustive at the audited length |
-| router: 48 patched, 98,304 rows checked, 0 selections below the kth score, selected weights within `1.5e-5` relative RMSE of the model's own `torch.topk` selection, every id difference a tied-expert exchange (46,587 rows, 106,997 ids) | exact threshold, bounded weight error |
+| router: 48 patched, 98,304 rows checked, 0 selections below the kth score, selected weights within `1.5e-5` relative RMSE (`1.47e-5` current) of the model's own `torch.topk` selection, every id difference a tied-expert exchange (79,859 ids across 34,190 rows current. 106,997 across 46,587 accepted) | exact threshold, bounded weight error |
 | adapters: 300 ordinary + 48 expert wrappers, 792 BF16 tensors, 699,678,720 parameters, 300 native-MMQ ordinary wrappers, 0 generic ones, 0 packed trainable | exact |
 | GatedDeltaNet value-head convention: 8 value reorders dropped at load, 36 layers taking the tiled broadcast, 0 modules with an input permutation | exact |
 | GatedDeltaNet kernel replacements installed: `gdn_bwd_dhu` (`BT 64`, `BK 64`, `BV 32`, 8 warps, 2 stages, BF16 query operand), `gdn_bwd_dqkwg` (`BK 128`, `BV 32`), `gdn_wu_recompute` | exact |
@@ -268,15 +258,15 @@ The audit re-derives every quantity below on the active checkpoint and fails clo
 
 The Qwen3.5-MoE and DeepSeek V4 audits run load, configuration patches, the adapter injection check, the training-contract check, and the measured updates. This audit adds eight architecture-owned passes. Three read module metadata or payload samples and cost nothing measurable (`ple_table`, `qsa_indexer`, `frozen_mmq_patch`). The five that run forwards are:
 
-| Pass | Seconds | Peak allocated above the resident model | What it does |
-| --- | ---: | ---: | --- |
-| `qsa_indexer_skip` | 1.801 | 81 MiB | installs the short circuit, requires the inventory and the exhaustiveness at the audited length, and runs the reference indexer twice to show that the mask it returns equals the causal-plus-padding mask, all-visible and right-padded |
-| `qsa_attention_equivalence` | 2.143 | 271 MiB | installs the QSA attention, requires the twelve-layer inventory, and compares the patched forward against the kept reference forward on real activations, all-visible and right-padded |
-| `fused_norm_equivalence` | 0.506 | 1600 MiB | installs Liger on the plain norms, FLA on the gated ones and the project kernel on the grouped ones, requires the 48/3/97/36 inventory, and checks all three contracts against autograd on an fp64 transcription of the module's own forward, including the gated norm's activation gradient |
-| `hc_norm_equivalence` | 0.410 | 1490 MiB | installs the fused grouped RMSNorm, requires the 97-connection inventory, and compares its forward and `dX` against the same fp64 truth alongside the patched module against its reference |
-| `autocast_dtype` | 10.522 | 3060 MiB | runs one forward and backward under `torch.autocast` with the adapters injected and checkpointing on, and requires every floating activation and cotangent outside the router gate to be BF16 |
+| Pass | Current warm-cache seconds | What it does |
+| --- | ---: | --- |
+| `qsa_indexer_skip` | 1.850 | installs the short circuit, requires the inventory and the exhaustiveness at the audited length, and runs the reference indexer twice to show that the mask it returns equals the causal-plus-padding mask, all-visible and right-padded |
+| `qsa_attention_equivalence` | 1.226 | installs the QSA attention, requires the twelve-layer inventory, and compares the patched forward against the kept reference forward on real activations, all-visible and right-padded |
+| `fused_norm_equivalence` | 0.477 | installs Liger on the plain norms, FLA on the gated ones and the project kernel on the grouped ones, requires the 48/3/97/36 inventory, and checks all three contracts against autograd on an fp64 transcription of the module's own forward, including the gated norm's activation gradient |
+| `hc_norm_equivalence` | 0.417 | installs the fused grouped RMSNorm, requires the 97-connection inventory, and compares its forward and `dX` against the same fp64 truth alongside the patched module against its reference |
+| `autocast_dtype` | 10.379 | runs one forward and backward under `torch.autocast` with the adapters injected and checkpointing on, and requires every floating activation and cotangent outside the router gate to be BF16 |
 
-The hyper-connection gate runs after the adapter injection, because that is what freezes the norm weight its predicate requires. The audit's `--profile-output` pass is the only heavy one, and it is now the Kineto trace in the phase table above.
+The pass timings are compile-cache-sensitive. The first cold max-steps-1 run measured `qsa_attention_equivalence` at `6.177 s`, `fused_norm_equivalence` at `3.644 s` and `autocast_dtype` at `30.702 s`. The warm validation measured the values in the table. The hyper-connection gate runs after adapter injection, because that is what freezes the norm weight its predicate requires. The profile pass adds the Kineto capture. It is not the only gate that takes seconds.
 
 The `autocast_dtype` pass exists because the trainer's execution mode is not the one the measurements use: `train_qwen4_exp.py` trains with `bf16=True`, so accelerate runs the model under `torch.autocast`, while the audit's own forward and backward run in BF16 without it. Autocast's FP32 list covers the reductions, so an op like `sum` can promote an activation and take the residual stream with it, and a custom op has no autocast policy to put the dtype back: whatever dtype reaches `torch_ggml_ops` is what its kernel validates. That is exactly how the PLE turned every layer after it FP32 and failed the packed projections' BF16 contract, so the gate now watches the trainer's mode rather than a mode nothing runs in.
 
@@ -296,7 +286,7 @@ The two conventions compute the same function under a relabeling of the value he
 
 The projection then consumes the packed columns in their own order and no input gather happens at all, and `torch-ggml-ops` added the exact `(n=2560, k=6144)` keys for Q3_K and IQ4_XS and `(n=2048, k=4096)` for the Qwen3.6 APEX-I-Mini checkpoint, 18 deployed keys over four HIP controls in both directions, including the IQ4_XS fragment-order forward at the training token count.
 
-Measured at the time: the warm update went from 10.50 s to 10.21 s with the convention and to 10.14 s with the keys.
+Measured on the 10.2 baseline: the warm update went from 10.50 s to 10.21 s with the convention and to 10.14 s with the keys. The current 10.3 re-audit is 9.62 s and does not change that attribution.
 
 `in_proj_qkv` and `in_proj_z` carry only the tiled-to-grouped *row* reorder, which the loader applies to their packed rows as whole blocks, so their packed weights are in the model's ordinary layout and every type and matrix size they contain is an exact dense deployment key.
 
@@ -340,7 +330,7 @@ The AITER entries come from the `qwen3.8-learned` keys in `moe_gmm_configs.py`, 
 
 `docs/aiter_gmm_ptgmm_coefficient_prior_tuning.md` owns that protocol and its evidence: all 54 exact keys carry measured entries, 33 of them a confirmed improvement over their seed (median 1.088x, up to 1.560x), 6 reverted because they measured ~2% slower on the independent replay, and 15 kept their seed because no candidate beat it.
 
-The measured cost of the whole routed-expert path, base projections and factors together, is 0.90 s per forward, 1.10 s of its own backward and 0.90 s recomputed.
+The measured cost of the whole routed-expert path, base projections and factors together, is 0.93 s per forward, 1.11 s of its own backward and 0.87 s recomputed in the current light profile. The accepted run measured 0.90/1.10/0.90 s. The grouped-MMQ base itself is flat. The AITER `gmm` kernel is the part that rose about 36 ms.
 
 The previous round's `_GenericGroupedProjection`, which dequantized the whole expert axis to BF16 and ran one dense grouped GEMM per projection, is gone with the generic checkpoint: it existed only because no grouped kernel covered `Q2_0`. The shared forward no longer takes pluggable base callables either, so `_base_grouped_pair` and `_base_grouped_linear` are the single integration point.
 
@@ -358,7 +348,7 @@ Reproducing `torch.topk`'s choice among tied experts is not a requirement, and n
 
 Measured on its own at the real shapes: the selection goes from 0.373 ms to 0.042 ms per call at 2,048 rows, 0.721 to 0.126 ms at 8,192 rows, and 3.77 to 0.509 ms at 32,768 rows, and the full router path (projection, selection, softmax over the ten, gather) from 0.66 to 0.47 ms per call at batch 1, 3.16 to 1.37 ms at batch 4, and 13.05 to 5.42 ms at batch 16, where the FP32 probability tensor and the argsort workspace also stop being materialized.
 
-In the attribution the MoE block remainder went from 41.7/49.2/41.9 ms to 32.4/43.0/32.8 ms of forward, backward and recomputation, 25 ms of the update.
+In the current attribution the MoE block remainder is 32.9/43.3/32.8 ms of forward, backward and recomputation, essentially unchanged from the accepted 32.4/43.0/32.8 ms. The optimization is still worth about 25 ms of the update.
 
 ### Packed LM-head loss
 
@@ -372,7 +362,7 @@ At S=2048 the budget covers the whole chunk, `block_topk == max_complete_blocks`
 
 That took the extra steps from 10.48/18.31 s to 3.47/9.83 s and 4.2 GiB off the peak.
 
-`qwen4_exp_attention.py` then patches the twelve indexed layers onto `qwen4_exp_qsa_attention.py`, replacing the whole module forward rather than only the attention interface, which removes the indexer call and the `[B, 1, S, S]` mask combination with it. The patched forward reproduces the projections, q/k RMSNorm and partial RoPE, takes the per-sample key bound from the model's causal mask, calls `qwen4_exp_qsa_attention_autograd`, applies the sigmoid gate and hands the result to `o_proj`. The attention category went from 178.7 ms of forward and 1210.0 ms of backward to 69.4 ms and 381.1 ms with 70.9 ms recomputed, and `_qsa_dkdv_gluon_kernel` is the Gluon dK/dV owner that made the backward a further 12-15% cheaper than the Triton kernel.
+`qwen4_exp_attention.py` then patches the twelve indexed layers onto `qwen4_exp_qsa_attention.py`, replacing the whole module forward rather than only the attention interface, which removes the indexer call and the `[B, 1, S, S]` mask combination with it. The patched forward reproduces the projections, q/k RMSNorm and partial RoPE, takes the per-sample key bound from the model's causal mask, calls `qwen4_exp_qsa_attention_autograd`, applies the sigmoid gate and hands the result to `o_proj`. The accepted 10.2 wiring took the attention category from 178.7 ms of forward and 1210.0 ms of backward to 69.4 ms and 381.1 ms with 70.9 ms recomputed. `_qsa_dkdv_gluon_kernel` is the Gluon dK/dV owner that made that backward a further 12-15% cheaper than the Triton kernel. The current 10.3 run measures 66.2 ms forward, 511.1 ms backward and 66.1 ms recomputed. The dQ kernel is now 195.6 ms of the backward and its `num_stages=2` seed is the regression. `num_stages=1` measures 27.93 ms per call against 37.05 ms in the isolated screen.
 
 The kernel contracts, the designs, the rejected alternatives and the tuning evidence live in `plan_qwen4_exp_qsa_forward.md`, `plan_qwen4_exp_qsa_backward.md` and `plan_qwen4_exp_qsa_kv_owner_rewrite.md`.
 
@@ -384,9 +374,9 @@ What this plan owns is the wiring: the twelve-layer inventory with a kept refere
 
 `qwen4_exp_fused_norms.py` owns the grouped kernel, which moved out of the hyper-connection module, and serves the other 87 norms: 48 plain through Liger (`offset=1.0`, `casting_mode="gemma"`, `in_place=False`), 36 gated through FLA's `LayerNormGatedFunction` (`is_rms_norm=True`, with the activation the checkpoint's config declares, which is sigmoid here rather than silu), and the 3 PLE grouped norms through the project kernel. The 97 hyper-connection norms are counted as skipped, because that module's forward owns them, and the inventory gate requires exactly 48/3/97/36. A grouped site keeps the module's own forward and falls back to it for anything outside the kernel's shape, dtype, row count or frozen-weight contract, and the audit requires the predicate to be true on the loaded model, so a silent fall back cannot pass.
 
-Measured: the gated norms took the GatedDeltaNet family from 3.30 s to 2.80 s, the Q/K head norms took the attention category from 0.55 s to 0.45 s, the PLE norms took that layer from 51.8/97.7/49.1 ms to 43.0/64.8/39.6 ms of forward, backward and recomputation, and the update from 11.1 s to 10.45 s at the light profile's instrument, which is 10.52 s at the audit's own extra steps.
+The gated norms took the GatedDeltaNet family from 3.30 s to 2.80 s, the Q/K head norms took the attention category from 0.55 s to 0.45 s, the PLE norms took that layer from 51.8/97.7/49.1 ms to 43.0/64.8/39.6 ms of forward, backward and recomputation, and the update from 11.1 s to 10.45 s at the light profile's instrument, which is 10.52 s at the audit's own extra steps. The current 10.3 update is 9.62 s.
 
-Peak allocation went from 67.8 GiB to 67.5 GiB.
+Peak allocation went from 67.8 GiB to 67.5 GiB. The current re-audit peaks at 67.34 GiB.
 
 The accuracy gate is fp64, and the truth comes from autograd on a transcription of the module's own expression rather than from a second transcription of the kernel's algebra. Both the kernel and the module sit on the bf16 store floor there: at weight scales 0, 0.1, 1.0 and 3.0 the kernel's `dX` is 1.66e-3 from fp64, the module's own `dX` is the same, and the two agree with each other to 1.5-1.8e-5.
 
@@ -407,11 +397,11 @@ The kernels this project owns replace three FLA kernels at their call sites:
 
 All three are installed next to the tuning table in both trainers and both audits. They are drop-ins with a kernel-level reference test each (`test_gdn_bwd_dhu.py`, `test_gdn_bwd_dqkwg.py`, `test_gdn_wu_recompute.py`), so they need no inventory gate of their own, and the audit records the installed geometries.
 
-Measured at the model level: the update goes from 10.14 s to 9.31 s, -0.83 s or 8.2%, with the allocation unchanged at 65.97/68.99 GiB. The per-kernel measurements, the roofline, the rejected alternatives and what remains are in `plan_qwen4_exp_gdn_forward.md` and `plan_qwen4_exp_gdn_backward.md`.
+Measured at the model level: the update went from 10.14 s to 9.31 s, -0.83 s or 8.2%, with the allocation unchanged at 65.97/68.99 GiB. The current 10.3 re-audit keeps the same kernels installed but measures 9.62 s. `chunk_bwd_kernel_dqkwg` is 370.7 ms against 299.7 ms accepted, so the FLA 0.6/Triton launch config needs revalidation. The per-kernel measurements, the roofline, the rejected alternatives and what remains are in `plan_qwen4_exp_gdn_forward.md` and `plan_qwen4_exp_gdn_backward.md`.
 
 One more change is written, tested and deliberately disconnected: `gdn_fused_prep.py` fuses the whole preparation of the chunked core (the depthwise convolution, its SiLU, the split and reshape, the tiled head broadcast, FLA's L2 normalization and the gating) into one forward kernel and four backward ones.
 
-Its kernels are worth 0.35 s of the update - the first warm update measures 8.96 s against 9.31 s - but it allocates 6.3 GiB more, and that run's next update crawls to 13.41 s where the run without it repeats 9.31 s.
+Its kernels are worth 0.35 s of the update - the first warm update measured 8.96 s against 9.31 s - but it allocates 6.3 GiB more, and that run's next update crawled to 13.41 s where the run without it repeated 9.31 s. It remains disconnected in the current tree.
 
 The 6.3 GiB is the op's saved state: `_GdnPrepFunction` keeps `mixed` and its five outputs for its backward, about 120 MB per layer, and gradient checkpointing means that state is produced during the recomputation and held until the backward consumes it, so all 48 layers' worth is live at the peak. The eager chain it replaces saves nothing comparable because its intermediates are recomputed rather than kept.
 
@@ -486,16 +476,17 @@ Two caveats are part of the record: the verification runs use `-fa off` because 
 
 ## Remaining work
 
-Ordered by the measured cost in the attribution table:
-- Routed experts, 2.90 s of the update: the largest single block, and the factor side is already tuned, so what is left is kernel work inside `torch-ggml-ops`. The pair forward for `Q2_0` currently launches twice because no fused HIP body exists for it, and the 0.90 s of recomputation is the same forward again. Measure any change at the complete-update boundary, and keep the current live footprint of a few tens of MiB.
+Ordered by the current measured cost:
+- Routed experts, 2.91 s of the update: the largest single block. The grouped-MMQ base is flat. The AITER factor path rose about 36 ms, and the pair forward for `Q2_0` still launches twice because no fused HIP body exists. The 0.87 s of recomputation is the same forward again. Measure any change at the complete-update boundary and keep the live footprint of a few tens of MiB.
+- QSA dQ and GatedDeltaNet `dqkwg` launch retune: these are the two measured Triton 3.9 regressions. QSA dQ is `195.6 ms` in the trace and its `num_stages=2` seed costs `37.05 ms` per call against `27.93 ms` for `num_stages=1`, about `0.11 s` over twelve layers. `chunk_bwd_kernel_dqkwg` is `370.7 ms` against `299.7 ms` accepted. The current launcher still uses `NUM_STAGES=2` and the FLA 0.6 grid. Re-screen both at the complete-update boundary before changing any algorithm.
 - GatedDeltaNet fused preparation, 0.35 s of step time for 6.3 GiB: reconnect it only with the backward recomputing instead of saving, then re-measure both the update and the allocation. The isolated kernel numbers are not in doubt. What fails is the memory trade.
 - Residual-stream arithmetic, 0.26 s (88.2 ms of forward and 174.4 ms of backward) for the two injection pairs per layer: `hidden_states.unsqueeze(-2) * injection_weights.unsqueeze(-1)` and `hyper_input + injection.flatten(-2)` at every hyper-connection boundary. One fused kernel could take it to roughly 0.13 s by writing the new stream once instead of three passes and producing all three gradients in one backward pass. Measured in isolation at the real shape and dtype: 0.91 ms of forward and 2.59 ms of forward plus backward per pair against 87 ms and 248 ms for the step's 96 pairs.
-- Hyper-connection elementwise chain, part of the family's 1.34 s: the two BF16 projections are 26.8 GFLOP per application and 2.6 TFLOP over a step, and a fused down/SiLU/up/sigmoid/mean/injection kernel could keep the 320-wide intermediate on chip and drop the ~0.3 s of elementwise traffic, but the GEMMs remain the floor of this family.
-- Under 0.25 s each and not worth a round of their own: the PLE layer, the packed LM head, the MoE block remainder and the shared expert. What is no longer on any list: the QSA indexer, the QSA attention in both directions, the LM head's logits path, the attention and shared-expert projections, the GatedDeltaNet projections, and the FLA autotune table.
-- Memory, for the machines that need it: the PLE table moves to the file for 26.82 GiB, which takes this step to 39.15 GiB allocated and a 40.69 GiB peak against 65.97 and 67.51. What is left resident is the checkpoint itself, 35.10 GiB, of which 31.6 GiB is the routed experts: a step reads all 512 experts in full, so they cannot go to the file the way the PLE table can, and a page cache holding them is the same RAM again. Adapters, gradients and the 8-bit optimizer state are 2.9 GiB together and already minimal, and the allocator knobs are excluded by the contract.
+- Hyper-connection elementwise chain, part of the family's 1.33 s: the two BF16 projections are 26.8 GFLOP per application and 2.6 TFLOP over a step, and a fused down/SiLU/up/sigmoid/mean/injection kernel could keep the 320-wide intermediate on chip and drop the ~0.3 s of elementwise traffic, but the GEMMs remain the floor of this family.
+- Under 0.25 s each and not worth a round of their own: the PLE layer, the packed LM head, the MoE block remainder and the shared expert. The QSA wiring itself, the QSA indexer, the LM head's logits path, the attention and shared-expert projections, the GatedDeltaNet projections and the FLA autotune table are closed. QSA dQ is the launch-retune exception above.
+- Memory: the resident step is `65.81 GiB` allocated with a `67.34 GiB` peak. The PLE-on-disk mode takes the accepted layout to `39.15 GiB` allocated and a `40.69 GiB` peak, but was not rerun on 10.3. What is left resident is the checkpoint itself, `35.10 GiB`, of which 31.6 GiB is the routed experts: a step reads all 512 experts in full, so they cannot go to the file the way the PLE table can, and a page cache holding them is the same RAM again. Adapters, gradients and the 8-bit optimizer state are 2.9 GiB together and already minimal, and the allocator knobs are excluded by the contract.
 - PLE disk residency: the mode is off by default and the prefetch that pays for its reads is wired only in the trainer's collator. A loop that accumulates several batches at once would want the prefetch ring widened (it holds four payloads), and a loop that can look further ahead than one batch would want the reads started earlier.
 - Physical B4 and B16 full updates: the next milestone. The kernels, the AITER tables and the attention padding path already cover both, and the audit currently accepts batch 1 only.
-- Do not reopen a standalone kernel without complete-boundary evidence, and do not accept isolated throughput that regresses complete-update time, memory, correctness, layout ownership or model semantics.
+- Do not reopen a standalone kernel without complete-boundary evidence, and do not accept isolated throughput that regresses complete-update time, memory, correctness, layout ownership or model semantics. The QSA dQ and `dqkwg` retunes are the only current exceptions because they are measured launch regressions, not new algorithms.
 
 ## Known limits
 
@@ -507,7 +498,7 @@ Ordered by the measured cost in the attribution table:
 - 1.18 GiB of hyper-connection weights are BF16 rather than quantized, so they are read at BF16 width in both directions. That is a bandwidth cost this recipe chose and keeps.
 - Nothing in the norm family is unserved: 97 grouped norms belong to the hyper-connection forward, three to the project grouped kernel, 48 plain to Liger and 36 gated to FLA. Of the 100 grouped norms, the 97 hyper-connection ones keep that module's forward because it needs the normalized stream twice.
 - Text only. The vision tower is a separate `mmproj` file and is not loaded.
-- The machine's unified memory is the binding constraint for headroom, not for correctness: the GPU has 1 GiB of dedicated VRAM and the rest of its memory is the system RAM itself, so the resident model and everything else share one pool. With the reader's pinned staging bounded, an update leaves 46 GiB of `MemAvailable` and touches no swap, and 73 GiB with the PLE table on disk.
+- The machine's unified memory is the binding constraint for headroom, not for correctness: the GPU has 1 GiB of dedicated VRAM and the rest of its memory is the system RAM itself, so the resident model and everything else share one pool. With the reader's pinned staging bounded, the current resident update leaves 46.04 GiB of `MemAvailable` and touches no swap. The accepted PLE-on-disk layout leaves above 72.94 GiB, but that mode was not rerun on 10.3.
 - The GatedDeltaNet fused preparation is implemented, tested and not wired, for the memory reason above.
 - The PLE table on disk costs what the SSD charges for random 4 KiB pages. A shuffled training loop reads about 100 MB of pages per step for 2.2 MiB of payload, 0.2-1.6 s of forward time when the reads are not prefetched, and a page cache does not help because only 1.5% of a step's pages repeat the previous step's. `prefetch_ple_rows()` takes that off the critical path, and it needs the batch's token ids on the host, which is why the wiring is the data collator. A loop that cannot offer host ids should leave the mode off. The audit reuses one batch, so its own numbers for the mode are warm ones.
 
@@ -515,13 +506,14 @@ Ordered by the measured cost in the attribution table:
 
 - `gguf_mmap_policy="pread"` with the reader's bounded pinned staging is part of the measurement environment, not a tuning knob. No allocator configuration is set.
 - Acceptance is the audit's gate set above on a real batch, not a single loss value.
-- The warm update is the reference: the measured updates after the first agree to 3 ms. The first update of a fresh process is 1.8 s slower because it carries the compilation of the dequantizer over its ~14 shape and grad-mode specializations, and the 1.5 GiB of 8-bit optimizer state is created on that first step. Run the audit with `--max-steps 3` and compare its `extra_steps`, or use `~/tmp/test_no_unsloth/qwen4_light_profile.py`, whose per-step attribution shows the same numbers without the audit's gates. That driver applies the same configuration calls as the audit and has to be kept in step with them: a driver missing the GatedDeltaNet installs measures the FLA path, and one missing the attention wiring reports the attention category as masked SDPA, 178.7 ms of forward and 1210.0 ms of backward, instead of 69.4 ms and 381.1 ms.
-- Attribution uses the same shared mechanism as the other two audits, `training_profiler.profile_warmed_training_update`, whose module ranges carry the same category vocabulary, and its Kineto path now completes on this checkpoint. The per-category numbers in this document come from `~/tmp/test_no_unsloth/qwen4_light_profile.py`, which measures the same ranges with CUDA events, so a capture's own overhead cannot distort them. Its self time is a module's inclusive span minus its categorized children's spans, taken from the measured event windows rather than from the order the hooks fired, which is what keeps a checkpointed layer's recomputation in its own bucket. The forward, backward and recomputed buckets then partition the step: 4.11 s plus 2.37 s against a 6.48 s backward wall in the current run.
+- The warm update is the reference. The canonical `--max-steps 1` profile provides one warm-up and one traced update. A separate warm validation run is archived under `qwen4_exp/audit/validation/` and its two updates agreed to 0.3 ms. The first update is compile-cache-sensitive rather than a fixed 1.8 s: it measured 10.14-10.34 s here and is not used as a speed result. The 1.5 GiB of 8-bit optimizer state is still created on that first step.
+- Use `~/tmp/test_no_unsloth/qwen4_light_profile.py` for the family attribution and the audit's Kineto trace for kernel deltas. The driver applies the same configuration calls as the audit and must be kept in step with them: a driver missing the GatedDeltaNet installs measures the FLA path, and one missing the attention wiring reports masked SDPA, 178.7 ms of forward and 1210.0 ms of backward, instead of the wired QSA path. Its output is `~/tmp/test_no_unsloth/qwen4_exp/profiles/qwen4_light_profile.json`.
+- Attribution uses the same shared mechanism as the other two audits, `training_profiler.profile_warmed_training_update`, whose module ranges carry the same category vocabulary. The light-profile self time is a module's inclusive span minus its categorized children's spans, taken from the measured event windows rather than the order the hooks fired. The current light-profile step 3 measured 2.73 s forward and 6.72 s backward. Its nested ordinary/hyper/PLE self-times are noisy, so use the Kineto kernel trace for those deltas.
 - The audit's measured forward and backward run in BF16 without autocast, so its `autocast_dtype` gate is what covers the trainer's `bf16=True` mode: it runs the same update under `torch.autocast` with the adapters injected and checkpointing on and requires one activation dtype. Keep that gate in step with the trainer, because a promotion it does not see is a promotion that fails a kernel's own validation at run time.
 - Layout probes: `~/tmp/test_no_unsloth/profile_qsa_attention_wiring.py` breaks one wired attention layer's forward into its RMSNorms, RoPE, copies, kernels and gate, and `~/tmp/test_no_unsloth/bench_qsa_layouts.py` times the QSA kernels under BHSD and BSHD and requires them to agree elementwise. The second is what keeps the BHSD-only contract a measurement rather than a preference.
 - Component benchmarks use the real packed payloads and the real routed row counts. `~/tmp/test_no_unsloth/qwen4_gmm_bench.py` is the driver for the decode and `gmm` numbers, and `~/tmp/test_no_unsloth/qwen4_quant_mix.py` prints the per-role quantization mix of a checkpoint.
 - PLE disk residency is measured three ways. `~/tmp/test_no_unsloth/ple_row_probe.py` and `ple_gather_probe.py` time the read paths (one `pread` per row, sorted multi-threaded `pread`, mmap with and without advice, `O_DIRECT` at two block sizes) at the real row count and require every path to return identical bytes. `ple_pattern_probe.py` computes the real n-gram ids of dataset rows and reports distinct rows, distinct pages and cross-step reuse. `~/tmp/test_no_unsloth/qwen4_light_profile.py --disk-ple [--prefetch] [--row-stride N]` measures the step itself, where `--row-stride` is what makes it a shuffled loop rather than one repeated batch, and the counters in its report say whether the reads were prefetched or paid for on a forward's critical path.
-- Reports, profiles, probes and throwaway scripts for this project live in `~/tmp/test_no_unsloth/`, not in the repository.
+- Reports and profiles live under `~/tmp/test_no_unsloth/qwen4_exp/{audit,profiles,bench,logs}/`. The preserved accepted run is under `audit/accepted/`. Throwaway scripts and probes remain in `~/tmp/test_no_unsloth/`, not in the repository.
 
 ## Code ownership
 
