@@ -85,7 +85,10 @@ def chunk_bwd_dqkwg(
     from triton.runtime.jit import JITFunction
 
     kernel = _fla_kernel()
-    grid = (1, triton.cdiv(sequence, 64), batch * value_heads)
+    # FLA 0.6 flattened the key and time axes into program_id(0), so the grid is 2D. One key
+    # block is the whole key dimension, which is what makes the time axis the only program_id(0)
+    # component here.
+    grid = (triton.cdiv(sequence, 64), batch * value_heads)
     kernel[grid](
         q=q,
         k=k,
