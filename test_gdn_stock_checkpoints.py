@@ -53,25 +53,23 @@ class _Model(nn.Module):
         super().__init__()
         self.config = _Config()
         linear_attn = nn.Module()
-        linear_attn.in_proj_qkv = nn.Linear(
-            HIDDEN, QUERY_KEY_ROWS + VALUE_DIM, bias=False
-        )
-        linear_attn.in_proj_z = nn.Linear(HIDDEN, VALUE_DIM, bias=False)
-        linear_attn.out_proj = nn.Linear(VALUE_DIM, HIDDEN, bias=False)
+        in_proj_qkv = nn.Linear(HIDDEN, QUERY_KEY_ROWS + VALUE_DIM, bias=False)
+        in_proj_z = nn.Linear(HIDDEN, VALUE_DIM, bias=False)
+        out_proj = nn.Linear(VALUE_DIM, HIDDEN, bias=False)
+        linear_attn.in_proj_qkv = in_proj_qkv
+        linear_attn.in_proj_z = in_proj_z
+        linear_attn.out_proj = out_proj
         self.linear_attn = linear_attn
         self_attn = nn.Module()
-        self_attn.q_proj = nn.Linear(HIDDEN, 2 * HIDDEN, bias=False)
+        q_proj = nn.Linear(HIDDEN, 2 * HIDDEN, bias=False)
+        self_attn.q_proj = q_proj
         self.self_attn = self_attn
 
-        for module in (
-            linear_attn.in_proj_qkv,
-            linear_attn.in_proj_z,
-            linear_attn.out_proj,
-        ):
+        for module in (in_proj_qkv, in_proj_z, out_proj):
             module.lora_A = nn.Linear(module.in_features, RANK, bias=False)
             module.lora_B = nn.Linear(RANK, module.out_features, bias=False)
-        self_attn.q_proj.lora_A = nn.Linear(HIDDEN, RANK, bias=False)
-        self_attn.q_proj.lora_B = nn.Linear(RANK, 2 * HIDDEN, bias=False)
+        q_proj.lora_A = nn.Linear(HIDDEN, RANK, bias=False)
+        q_proj.lora_B = nn.Linear(RANK, 2 * HIDDEN, bias=False)
 
     def factors(self) -> dict[str, torch.Tensor]:
         return {

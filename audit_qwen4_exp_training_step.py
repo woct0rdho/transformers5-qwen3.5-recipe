@@ -14,7 +14,6 @@ import math
 from pathlib import Path
 from typing import Any, cast
 
-import bitsandbytes as bnb
 import torch
 from datasets import Dataset, load_from_disk
 from peft import LoraConfig, TaskType, get_peft_model
@@ -40,6 +39,7 @@ from transformers.models.qwen4_exp.modeling_qwen4_exp import (
     Qwen4ExpTextTopKRouter,
 )
 
+from adamw_8bit_sr import AdamW8bitSR
 from fast_lora import FastGgufLoraLinear, FastLoraLinear
 from fast_moe_ranking import configure_fast_moe_ranking
 from fla_tuning import configure_qwen4_exp_fla, require_complete_qwen4_exp_fla
@@ -175,7 +175,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rank", type=int, default=4)
     parser.add_argument("--alpha", type=int, default=4)
     parser.add_argument("--learning-rate", type=float, default=1e-4)
-    parser.add_argument("--weight-decay", type=float, default=1e-3)
+    parser.add_argument("--weight-decay", type=float, default=1e-2)
+    parser.add_argument("--moe-weight-decay", type=float, default=1e-3)
     parser.add_argument("--max-grad-norm", type=float, default=1.0)
     parser.add_argument("--row-start", type=int, default=0)
     parser.add_argument("--seed", type=int, default=19_260_817)
@@ -1361,10 +1362,11 @@ def main() -> None:
     optimizer = run_phase(
         report["timeline"],
         "optimizer_create",
-        lambda: bnb.optim.AdamW8bit(
-            [parameter for parameter in model.parameters() if parameter.requires_grad],
+        lambda: AdamW8bitSR(
+            model.named_parameters(),
             lr=args.learning_rate,
             weight_decay=args.weight_decay,
+            routed_expert_decay=args.moe_weight_decay,
         ),
     )
     report["optimizer"] = audit_optimizer(optimizer, model)

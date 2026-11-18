@@ -22,7 +22,7 @@ patching protocol lives in `module_patching.py`.
 from typing import Any
 
 import torch
-from fla.modules.fused_norm_gate import LayerNormGatedFunction
+from fla.modules.norm.fused_norm_gate import LayerNormGatedFunction
 from liger_kernel.ops import LigerRMSNormFunction
 from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import (
     Qwen3_5MoeRMSNorm,

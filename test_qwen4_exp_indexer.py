@@ -6,6 +6,7 @@ from typing import Any, cast
 import pytest
 import torch
 from transformers import Qwen4ExpTextConfig
+from transformers.cache_utils import Cache
 from transformers.models.qwen4_exp.modeling_qwen4_exp import Qwen4ExpTextQSAIndexer
 
 from qwen4_exp_indexer import (
@@ -80,7 +81,11 @@ def test_wrapper_skips_when_exhaustive_and_delegates_otherwise() -> None:
 
     # A cache always delegates, since the indexer key state is then real work.
     _qwen4_indexer_forward(
-        cast(Any, module), hidden, (torch.zeros(1), torch.zeros(1)), mask, object()
+        cast(Any, module),
+        hidden,
+        (torch.zeros(1), torch.zeros(1)),
+        mask,
+        cast(Cache, object()),
     )
     assert len(calls) == 2
 

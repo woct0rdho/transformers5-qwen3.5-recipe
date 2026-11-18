@@ -134,10 +134,10 @@ def chunk_bwd_dqkwg(
 def _fla_kernel():
     """FLA's kernel, unwrapped past the autotuner and the heuristics that compute its flags."""
 
-    from fla.ops.common import chunk_o
+    from fla.ops.common.chunk_o import chunk_bwd_kernel_dqkwg
     from triton.runtime.jit import JITFunction
 
-    kernel = chunk_o.chunk_bwd_kernel_dqkwg
+    kernel = chunk_bwd_kernel_dqkwg
     while not isinstance(kernel, JITFunction):
         kernel = kernel.fn
     return kernel

@@ -179,10 +179,10 @@ def test_loader_drops_exactly_the_value_reorders() -> None:
     assert after.count("Unsqueeze") == 1
 
 
-def test_the_rewrite_only_happens_inside_a_gated_delta_net_forward() -> None:
+def test_the_tiled_expansion_only_happens_inside_a_gated_delta_net_forward() -> None:
     configure_tiled_value_heads()
     tensor = torch.arange(3 * _H_K, dtype=torch.float32).reshape(1, 3, _H_K, 1)
-    # Outside a forward the method keeps its grouped, interleaved semantics.
+    # Outside a forward tensor expansion keeps its grouped, interleaved semantics.
     outside = tensor.repeat_interleave(_HEADS_PER_K, dim=2)
     assert outside[0, 0, :, 0].tolist() == [0.0, 0.0, 1.0, 1.0]
 

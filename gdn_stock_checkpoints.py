@@ -27,7 +27,7 @@ from typing import Any
 
 import torch
 
-from gdn_value_axis import GROUPED, TILED, ValueAxisGeometry, rule_for
+from gdn_value_axis import GROUPED, TILED, ValueAxisGeometry, ValueAxisRule, rule_for
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +39,7 @@ _ADAM_STATE_KEYS = ("exp_avg", "exp_avg_sq", "max_exp_avg_sq")
 _CONFIGURED = False
 
 
-def geometry_for(model: Any) -> ValueAxisGeometry:
+def geometry_for(model: torch.nn.Module) -> ValueAxisGeometry:
     """The GDN head geometry of the model a checkpoint belongs to."""
     config = getattr(model, "config", None)
     if config is None:
@@ -54,7 +54,7 @@ def geometry_for(model: Any) -> ValueAxisGeometry:
 
 
 def stock_layout_state_dict(
-    model: Any, state_dict: dict[str, Any], *, to_layout: str
+    model: torch.nn.Module, state_dict: dict[str, Any], *, to_layout: str
 ) -> dict[str, Any]:
     """Return `state_dict` with every value-axis adapter factor moved into `to_layout`."""
     geometry = geometry_for(model)
@@ -76,7 +76,7 @@ def _flattened_parameters(optimizer: torch.optim.Optimizer) -> list[torch.Tensor
     return [param for group in optimizer.param_groups for param in group["params"]]
 
 
-def _parameter_names(model: Any) -> dict[int, str]:
+def _parameter_names(model: torch.nn.Module) -> dict[int, str]:
     return {id(param): name for name, param in model.named_parameters()}
 
 
@@ -110,7 +110,7 @@ def _move_blocks_as_blocks(
 
 def _permute_quantized_entry(
     entry: dict[str, Any],
-    rule: Any,
+    rule: ValueAxisRule,
     geometry: ValueAxisGeometry,
     shape: tuple[int, ...],
     to_layout: str,
@@ -213,7 +213,7 @@ def permute_state_entry(
 
 def convert_optimizer_state(
     optimizer: torch.optim.Optimizer,
-    model: Any,
+    model: torch.nn.Module,
     state_dict: dict[str, Any],
     *,
     to_layout: str,
@@ -249,7 +249,7 @@ def convert_optimizer_state(
 
 @contextmanager
 def saving_optimizer_state(
-    optimizer: torch.optim.Optimizer | None, model: Any | None
+    optimizer: torch.optim.Optimizer | None, model: torch.nn.Module | None
 ) -> Generator[None]:
     """Convert `optimizer.state_dict()` to grouped order for the duration of the block."""
     if not _CONFIGURED or optimizer is None or model is None:
@@ -278,7 +278,7 @@ def saving_optimizer_state(
 
 @contextmanager
 def loading_optimizer_state(
-    optimizer: torch.optim.Optimizer | None, model: Any | None
+    optimizer: torch.optim.Optimizer | None, model: torch.nn.Module | None
 ) -> Generator[None]:
     """Convert a loaded `optimizer.pt` from grouped order into the in-memory tiled layout."""
     if not _CONFIGURED or optimizer is None or model is None:

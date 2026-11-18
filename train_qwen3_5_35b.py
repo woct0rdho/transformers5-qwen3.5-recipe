@@ -147,7 +147,7 @@ def main():
         per_device_train_batch_size=1,  # Increase batch size if you have more VRAM
         gradient_accumulation_steps=1,
         learning_rate=1e-4,
-        weight_decay=1e-3,  # For MoE models this can be smaller than dense models
+        weight_decay=1e-2,  # dense adapters. The routed experts use moe_weight_decay below
         max_grad_norm=1,
         num_train_epochs=1,
         lr_scheduler_type="linear",
@@ -156,7 +156,7 @@ def main():
         save_steps=100,
         save_total_limit=5,
         bf16=True,
-        optim="adamw_8bit",
+        optim="adamw_torch",  # replaced by AdamW8bitSR in BF16AdapterTrainer
         gradient_checkpointing=True,
         gradient_checkpointing_kwargs={"use_reentrant": False},
         remove_unused_columns=False,
@@ -171,6 +171,7 @@ def main():
         train_dataset=dataset,
         args=training_args,
         data_collator=fixed_length_lm_collator,
+        moe_weight_decay=1e-3,
     )
 
     trainer_stats = trainer.train()

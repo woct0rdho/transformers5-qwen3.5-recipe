@@ -22,7 +22,7 @@ parameter wrappers and transient state on the expert module.
 
 import math
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any, Protocol, cast
 
 import torch
 from aiter.ops.triton.gemm.grouped.gmm import gmm, ptgmm
@@ -37,7 +37,6 @@ from transformers.integrations.gguf.moe import ALL_GGUF_EXPERTS_FUNCTIONS, GgufE
 from fast_moe_routing import finalize_expert_routing, prepare_expert_routing
 from moe_gmm_configs import gmm_config as _gmm_config
 from moe_gmm_configs import ptgmm_config as _ptgmm_config
-from torch_typing import TorchModule
 
 QWEN3_5_MOE_EXPERTS_IMPLEMENTATION = "qwen3_5_moe_gguf_mmq_aiter_lora"
 _LORA_WEIGHTS_KWARG = "_gguf_moe_lora_weights"
@@ -197,7 +196,7 @@ class _AiterGroupedMM(torch.autograd.Function):
         return _aiter_forward(lhs, rhs, group_sizes, expert_prior=ctx.expert_prior)
 
     @staticmethod
-    def backward(ctx, grad_output: torch.Tensor):  # ty: ignore[invalid-method-override]
+    def backward(ctx, grad_output: torch.Tensor):  # ty: ignore[incompatible-method-override]
         rhs, group_sizes, lhs_or_source, lhs_permutation = ctx.saved_tensors
         if grad_output.stride() != (grad_output.shape[1], 1):
             raise ValueError("AITER grouped MM output gradient must be row-major.")
@@ -295,8 +294,8 @@ def _base_grouped_linear(
     hidden_states, expert_indices, expert_offsets = _native_grouped_arguments(
         hidden_states, expert_indices, expert_offsets, compute_dtype
     )
-    quant_type = int(cast(Any, weight.quant_type))
-    logical_shape = cast(tuple[int, ...], weight.logical_shape)
+    quant_type = int(weight.quant_type)
+    logical_shape = weight.logical_shape
     return grouped_mmq(
         hidden_states,
         weight.as_subclass(torch.Tensor),
@@ -331,8 +330,8 @@ def _base_grouped_pair(
         hidden_states, expert_indices, expert_offsets = _native_grouped_arguments(
             hidden_states, expert_indices, expert_offsets, compute_dtype
         )
-        quant_type = int(cast(Any, first_weight.quant_type))
-        logical_shape = cast(tuple[int, ...], first_weight.logical_shape)
+        quant_type = int(first_weight.quant_type)
+        logical_shape = first_weight.logical_shape
         return grouped_mmq_pair(
             hidden_states,
             first_weight.as_subclass(torch.Tensor),
@@ -382,8 +381,15 @@ class _ExpertLoraWeights:
     expert_prior: str
 
 
+class _ExpertIndexPlan(Protocol):
+    """The one routing-plan field the packed expert layout reads."""
+
+    @property
+    def expert_indices(self) -> torch.Tensor: ...
+
+
 def _prepare_packed_expert_execution(
-    routing_plan: Any,
+    routing_plan: _ExpertIndexPlan,
     num_experts: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Return expert IDs, int32 offsets, and int32 group sizes for every expert.
@@ -410,7 +416,7 @@ def _prepare_packed_expert_execution(
     return expert_ids, group_sizes.cumsum(0, dtype=torch.int32), group_sizes
 
 
-class FastGgufMoeLora(TorchModule, LoraLayer):
+class FastGgufMoeLora(torch.nn.Module, LoraLayer):
     """PEFT LoRA wrapper owning all factors for one packed `GgufExperts` module."""
 
     adapter_layer_names = ("lora_A", "lora_B", "lora_A_down", "lora_B_down")
@@ -501,10 +507,10 @@ class FastGgufMoeLora(TorchModule, LoraLayer):
             (e, h, r), device=device, dtype=dtype
         )
 
-        lora_a = cast(Any, self.lora_A[adapter_name])
-        lora_b = cast(Any, self.lora_B[adapter_name])
-        lora_a_down = cast(Any, self.lora_A_down[adapter_name])
-        lora_b_down = cast(Any, self.lora_B_down[adapter_name])
+        lora_a = cast(_ExpertFactor, self.lora_A[adapter_name])
+        lora_b = cast(_ExpertFactor, self.lora_B[adapter_name])
+        lora_a_down = cast(_ExpertFactor, self.lora_A_down[adapter_name])
+        lora_b_down = cast(_ExpertFactor, self.lora_B_down[adapter_name])
         init = config.init_lora_weights
         if init is True:
             torch.nn.init.kaiming_uniform_(lora_a.weight, a=math.sqrt(5))
@@ -542,7 +548,9 @@ class FastGgufMoeLora(TorchModule, LoraLayer):
             "GGUF expert LoRA does not materialize a full expert delta weight."
         )
 
-    def _active_lora_weights(self, adapter_names: Any) -> _ExpertLoraWeights | None:
+    def _active_lora_weights(
+        self, adapter_names: list[str] | None
+    ) -> _ExpertLoraWeights | None:
         if self.disable_adapters:
             return None
         if adapter_names is not None:
@@ -556,10 +564,10 @@ class FastGgufMoeLora(TorchModule, LoraLayer):
         adapter_name = self.active_adapters[0]
         if adapter_name not in self.lora_A:
             return None
-        lora_a = cast(Any, self.lora_A[adapter_name])
-        lora_b = cast(Any, self.lora_B[adapter_name])
-        lora_a_down = cast(Any, self.lora_A_down[adapter_name])
-        lora_b_down = cast(Any, self.lora_B_down[adapter_name])
+        lora_a = cast(_ExpertFactor, self.lora_A[adapter_name])
+        lora_b = cast(_ExpertFactor, self.lora_B[adapter_name])
+        lora_a_down = cast(_ExpertFactor, self.lora_A_down[adapter_name])
+        lora_b_down = cast(_ExpertFactor, self.lora_B_down[adapter_name])
         return _ExpertLoraWeights(
             gate_up_a=lora_a.weight,
             gate_up_b=lora_b.weight,

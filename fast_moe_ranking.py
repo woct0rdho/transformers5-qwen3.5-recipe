@@ -423,7 +423,7 @@ class _DeepseekHashRouterLogits(torch.autograd.Function):
         return logits
 
     @staticmethod
-    def backward(  # ty: ignore[invalid-method-override]
+    def backward(  # ty: ignore[incompatible-method-override]
         ctx: Any,
         grad_logits: torch.Tensor,
     ) -> tuple[torch.Tensor | None, None, None]:

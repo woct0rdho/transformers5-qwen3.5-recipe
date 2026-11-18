@@ -46,6 +46,7 @@ from typing import Any, cast
 import torch
 import triton
 import triton.language as tl
+from transformers.cache_utils import Cache
 from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import Qwen3_5MoeGatedDeltaNet
 from transformers.models.qwen4_exp.modeling_qwen4_exp import Qwen4ExpTextGatedDeltaNet
 from triton.language.extra import libdevice
@@ -682,7 +683,7 @@ class _GdnPrepFunction(torch.autograd.Function):
         return q, k, v, g, beta
 
     @staticmethod
-    def backward(  # ty: ignore[invalid-method-override]  (autograd's base takes *grad_outputs)
+    def backward(  # ty: ignore[incompatible-method-override]  (autograd's base takes *grad_outputs)
         ctx,
         dq: torch.Tensor,
         dk: torch.Tensor,
@@ -846,6 +847,9 @@ _GDN_LAYER_TYPES: tuple[type[torch.nn.Module], ...] = (
 # does not model.
 _VARIABLE_LENGTH_KEYS = ("cu_seqlens", "cu_seq_lens_q", "seq_idx")
 
+# The two layer families that share this preparation.
+_GatedDeltaNetLayer = Qwen4ExpTextGatedDeltaNet | Qwen3_5MoeGatedDeltaNet
+
 # The eager forward's only use of the padding mask, which is cheap enough to keep: it zeroes the
 # padded rows before the projection. Every other consumer of a mask in this architecture belongs to
 # the packed-sequence path the guard above rejects.
@@ -855,9 +859,8 @@ MASK_HELPER_NAME = "apply_mask_to_padding_states"
 def _site_supports(module: torch.nn.Module) -> bool:
     """Whether one GatedDeltaNet layer is a site the fused preparation can serve."""
 
-    # The layer carries these as plain Python numbers. The cast is for the type checker, for which
-    # `nn.Module.__getattr__` is untyped.
-    layer = cast(Any, module)
+    # The layer carries these as plain Python numbers.
+    layer = cast(_GatedDeltaNetLayer, module)
     head_dim = int(layer.head_k_dim)
     if head_dim != int(layer.head_v_dim):
         # The preparation tiles one head dimension for query, key and value alike.
@@ -880,10 +883,10 @@ def _site_supports(module: torch.nn.Module) -> bool:
     return channels == int(conv.weight.shape[0])
 
 
-def _training_path_applies(cache_params: Any, kwargs: Mapping[str, Any]) -> bool:
+def _training_path_applies(cache: Cache | None, kwargs: Mapping[str, Any]) -> bool:
     """Whether this call is the training path, which is the only one the patch replaces."""
 
-    if cache_params is not None:
+    if cache is not None:
         # Decode and cached prefill stay on the eager forward: they carry recurrent state and use the
         # single-token kernels.
         return False
@@ -901,19 +904,18 @@ def prepare_fused_preparation_site(name: str, module: torch.nn.Module) -> None:
 def fused_preparation_forward(
     self: torch.nn.Module,
     hidden_states: torch.Tensor,
-    cache_params: Any = None,
+    cache: Cache | None = None,
     attention_mask: torch.Tensor | None = None,
     **kwargs: Any,
 ) -> torch.Tensor:
     """The GatedDeltaNet layer's forward, with its preparation fused into one kernel."""
 
-    # The layer's attributes are untyped through `nn.Module.__getattr__`. The cast is for the type
-    # checker only.
-    layer = cast(Any, self)
+    # The layer's attributes are not on the base `torch.nn.Module` surface.
+    layer = cast(_GatedDeltaNetLayer, self)
 
-    if not _training_path_applies(cache_params, kwargs):
+    if not _training_path_applies(cache, kwargs):
         unpatched = getattr(self, UNPATCHED_FORWARD)
-        return unpatched(hidden_states, cache_params, attention_mask, **kwargs)
+        return unpatched(hidden_states, cache, attention_mask, **kwargs)
 
     batch_size, seq_len, _ = hidden_states.shape
     head_dim = int(layer.head_v_dim)
@@ -925,7 +927,7 @@ def fused_preparation_forward(
         )
         if mask_helper is None:
             unpatched = getattr(self, UNPATCHED_FORWARD)
-            return unpatched(hidden_states, cache_params, attention_mask, **kwargs)
+            return unpatched(hidden_states, cache, attention_mask, **kwargs)
         hidden_states = mask_helper(hidden_states, attention_mask)
 
     mixed = layer.in_proj_qkv(hidden_states)

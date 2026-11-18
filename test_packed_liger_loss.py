@@ -217,7 +217,7 @@ def test_assembled_output_surfaces_requested_optional_fields() -> None:
 
     assembled = assembled_scoped_output(
         SimpleNamespace(
-            past_key_values=None,
+            cache=None,
             hidden_states=None,
             attentions=None,
             router_logits=None,

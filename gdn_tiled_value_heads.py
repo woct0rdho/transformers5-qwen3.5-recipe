@@ -13,11 +13,12 @@ This module keeps the file's order end to end instead:
 - `get_gguf_conversion_mapping` is wrapped so the load skips the value-head reorders. Everything else
   the mapping does stays: the `(1 + weight)` norm offsets, `-exp(A_log)`, the `conv1d` unsqueeze, and the
   renames.
-- The GatedDeltaNet broadcast between key and value heads is switched from `repeat_interleave` (grouped
-  pairing) to `repeat` (tiled pairing) while that forward runs. The two conventions compute the same
-  function under a relabeling of the value heads, and every other operation on the value axis - the
-  recurrent core, the gated norm, the depthwise conv, `A_log`, `dt_bias`, `in_proj_a`/`in_proj_b` - is
-  per head, so nothing else changes.
+- The GatedDeltaNet kernels pair a value head with key head `value_head // groups` (grouped pairing).
+  While a layer forward runs, their query and key inputs are expanded with `repeat` (tiled pairing)
+  before the kernel, so the kernel sees the same head count and performs no pairing of its own. The
+  two conventions compute the same function under a relabeling of the value heads, and every other
+  operation on the value axis - the recurrent core, the gated norm, the depthwise conv, `A_log`,
+  `dt_bias`, `in_proj_a`/`in_proj_b` - is per head, so nothing else changes.
 
 `in_proj_a` and `in_proj_b` keep the compiled-dequant base: they are small, and their reorder was never
 a layout obstacle.
@@ -27,8 +28,8 @@ this axis saved tiled makes `convert_lora_to_gguf.py` permute it a second time. 
 owns that boundary and is what the training script installs next to this patch, writing adapter weights
 and `optimizer.pt` in transformers' grouped order and permuting them back on `resume_from_checkpoint`.
 
-The module patches classes and one loader function, so `configure_tiled_value_heads` has to run before
-the model is loaded.
+The module patches classes, the two GatedDeltaNet kernel entry points, and one loader function, so
+`configure_tiled_value_heads` has to run before the model is loaded.
 """
 
 import contextlib
@@ -42,7 +43,9 @@ from transformers.integrations.gguf.gguf_conversion_mapping import (
     TiledToGroupedInputs,
     TiledToGroupedRows,
 )
+from transformers.models.qwen3_5_moe import modeling_qwen3_5_moe
 from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import Qwen3_5MoeGatedDeltaNet
+from transformers.models.qwen4_exp import modeling_qwen4_exp
 from transformers.models.qwen4_exp.modeling_qwen4_exp import Qwen4ExpTextGatedDeltaNet
 from transformers.quantizers import quantizer_gguf
 
@@ -56,9 +59,14 @@ _VALUE_REORDER_TYPES = (TiledToGroupedRows, TiledToGroupedInputs)
 # moved on, and the layout decision has to be revisited.
 _EXPECTED_VALUE_REORDERS = 8
 _GDN_TYPES = (Qwen4ExpTextGatedDeltaNet, Qwen3_5MoeGatedDeltaNet)
+# The kernels read `num_v_heads // num_k_heads` from their shape arguments and pair a value head with
+# key head `value_head // groups` (the grouped convention). The tiled order pairs it with
+# `value_head % num_key_heads`, so the expansion is done before the kernel and both sides see the
+# same head count. They are module globals looked up at call time by the layer forwards.
+_GDN_MODULES = (modeling_qwen4_exp, modeling_qwen3_5_moe)
+_KERNEL_NAMES = ("torch_chunk_gated_delta_rule", "torch_recurrent_gated_delta_rule")
 _SUBJECT = "GatedDeltaNet value-head layout"
 
-_ORIGINAL_REPEAT_INTERLEAVE = torch.Tensor.repeat_interleave
 _STATE: dict[str, Any] = {
     "module": None,
     "rewrites": 0,
@@ -106,27 +114,6 @@ def _conversion_mapping(original):
     return mapping
 
 
-def _tiled_repeat_interleave(self, repeats, dim=None, *, output_size=None):
-    """`repeat_interleave`, tiled inside a GatedDeltaNet forward.
-
-    The file's value heads are `[k0..k15, k0..k15, ...]`, which is `repeat` on the head axis, where
-    the grouped convention is `[k0, k0, k1, k1, ...]`. Only that forward is rewritten, and only for the
-    4-D key and query tensors it expands.
-    """
-
-    if (
-        _STATE["enabled"]
-        and _STATE["module"] is not None
-        and dim == 2
-        and self.dim() == 4
-        and int(repeats) > 1
-    ):
-        _STATE["rewrites"] += 1
-        _STATE["layers"].add(_STATE["module"])
-        return self.repeat(1, 1, int(repeats), 1)
-    return _ORIGINAL_REPEAT_INTERLEAVE(self, repeats, dim, output_size=output_size)
-
-
 @contextlib.contextmanager
 def _tiled_scope(module: torch.nn.Module) -> Generator[None]:
     previous = _STATE["module"]
@@ -147,6 +134,35 @@ def grouped_broadcast() -> Generator[None]:
         yield
     finally:
         _STATE["enabled"] = previous
+
+
+def _tiled_broadcast_heads(
+    query: torch.Tensor, key: torch.Tensor, value: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Expand key heads in the tiled order when the kernel was handed the grouped head count."""
+
+    if query.dim() != 4 or key.dim() != 4 or value.dim() != 4:
+        return query, key
+    key_heads, value_heads = query.shape[2], value.shape[2]
+    if value_heads <= key_heads or value_heads % key_heads:
+        return query, key
+    groups = value_heads // key_heads
+    query = query.repeat(1, 1, groups, 1)
+    key = key.repeat(1, 1, groups, 1)
+    module = _STATE["module"]
+    if module is not None:
+        _STATE["rewrites"] += 2
+        _STATE["layers"].add(module)
+    return query, key
+
+
+def _tiled_kernel(original):
+    def kernel(query, key, value, *args, **kwargs):
+        if _STATE["enabled"] and _STATE["module"] is not None:
+            query, key = _tiled_broadcast_heads(query, key, value)
+        return original(query, key, value, *args, **kwargs)
+
+    return kernel
 
 
 def _gdn_forward(original):
@@ -170,7 +186,9 @@ def configure_tiled_value_heads() -> dict[str, Any]:
     wrapped = _conversion_mapping(gguf_utils.get_gguf_conversion_mapping)
     for module in (gguf_utils, gguf_package, quantizer_gguf):
         module.get_gguf_conversion_mapping = wrapped
-    torch.Tensor.repeat_interleave = _tiled_repeat_interleave
+    for modeling in _GDN_MODULES:
+        for name in _KERNEL_NAMES:
+            setattr(modeling, name, _tiled_kernel(getattr(modeling, name)))
     for gdn_type in _GDN_TYPES:
         gdn_type.forward = _gdn_forward(gdn_type.forward)
     _CONFIGURED = True
@@ -178,11 +196,11 @@ def configure_tiled_value_heads() -> dict[str, Any]:
 
 
 def record_tiled_broadcast(module: torch.nn.Module) -> None:
-    """Record a tiled key-head broadcast produced outside `repeat_interleave`.
+    """Record a tiled key-head broadcast produced outside the kernel wrapper.
 
-    The fused preparation builds the broadcast itself, in the same tiled order the patched
-    `repeat_interleave` produces, so the inventory gate that counts which layers took the tiled
-    convention has to be told about it.
+    The fused preparation builds the broadcast itself, in the same tiled order the kernel wrapper
+    produces, so the inventory gate that counts which layers took the tiled convention has to be told
+    about it.
     """
 
     _STATE["layers"].add(module)

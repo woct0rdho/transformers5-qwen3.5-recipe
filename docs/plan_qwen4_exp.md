@@ -280,7 +280,7 @@ The checkpoint remains compressed after loading: 737 `GgufLinear` modules, 448 f
 
 That is all 300 ordinary wrappers, in both directions, and the audit gates the count in both directions so a checkpoint that moves one projection to another base shows up as a mismatch instead of a silent slowdown.
 
-The 36 GatedDeltaNet output projections run the native base as well, which took a convention change: `gdn_tiled_value_heads.py` wraps `get_gguf_conversion_mapping` so the load skips the eight value-head reorders the mapping would apply, and switches the GatedDeltaNet broadcast from `repeat_interleave` (grouped pairing) to `repeat` (tiled pairing) while that forward runs.
+The 36 GatedDeltaNet output projections run the native base as well, which took a convention change: `gdn_tiled_value_heads.py` wraps `get_gguf_conversion_mapping` so the load skips the eight value-head reorders the mapping would apply, and expands the kernel's query and key inputs with `repeat` (tiled pairing) instead of the kernel's grouped pairing while a layer forward runs.
 
 The two conventions compute the same function under a relabeling of the value heads, and every other operation on the value axis - the recurrent core, the gated norm, the depthwise conv, `A_log`, `dt_bias` and `in_proj_a`/`in_proj_b` - is per head, so nothing else moved.
 
@@ -288,7 +288,7 @@ The projection then consumes the packed columns in their own order and no input 
 
 Measured on the 10.2 baseline: the warm update went from 10.50 s to 10.21 s with the convention and to 10.14 s with the keys. The current 10.3 re-audit is 9.62 s and does not change that attribution.
 
-`in_proj_qkv` and `in_proj_z` carry only the tiled-to-grouped *row* reorder, which the loader applies to their packed rows as whole blocks, so their packed weights are in the model's ordinary layout and every type and matrix size they contain is an exact dense deployment key.
+`in_proj_qkv` and `in_proj_z` carry only the tiled-to-grouped row reorder, which the loader applies to their packed rows as whole blocks, so their packed weights are in the model's ordinary layout and every type and matrix size they contain is an exact dense deployment key.
 
 `configure_compiled_gguf_dequantize()` remains for `in_proj_a` and `in_proj_b`, two `[48, 2560]` frozen projections per layer that are below the granularity of a deployed key, and for the LM head's non-training evaluation path. `fast_lora.packed_mmq_weight` refuses any module that carries an `input_permutation`, which is now nothing in this model.
 
@@ -342,7 +342,7 @@ Qwen4-Exp's router is the same selection the other two architectures have: a BF1
 
 Qwen4-Exp is the widest geometry it serves: 2,560 hidden states, 512 experts, top-10, 98,304 rows per step over its 48 layers.
 
-The old path materialized an FP32 softmax over all 512 experts and ranked it with a stable full argsort, which existed only to make the selection deterministic. Determinism is a real requirement, but only of *our* implementation: a checkpointed layer's replay has to save as many tensors as its forward did, or `torch.utils.checkpoint` rejects it with a tensor-count mismatch.
+The old path materialized an FP32 softmax over all 512 experts and ranked it with a stable full argsort, which existed only to make the selection deterministic. Determinism is a real requirement, but only of our implementation: a checkpointed layer's replay has to save as many tensors as its forward did, or `torch.utils.checkpoint` rejects it with a tensor-count mismatch.
 
 Reproducing `torch.topk`'s choice among tied experts is not a requirement, and no gate compares expert identities, so the streaming kernel resolves a tie to the lower expert index by construction and the audit compares selected weights with a tolerance plus the requirement that every selected expert scores at or above the kth threshold.
 

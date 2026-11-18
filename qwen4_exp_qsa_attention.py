@@ -1059,7 +1059,7 @@ class _QsaAttentionFunction(torch.autograd.Function):
         return output
 
     @staticmethod
-    def backward(ctx, doutput):  # ty: ignore[invalid-method-override]
+    def backward(ctx, doutput):  # ty: ignore[incompatible-method-override]
         query, key, value, output, softmax_lse, key_end = ctx.saved_tensors
         dquery, dkey, dvalue, _ = _qsa_backward(
             query, key, value, output, doutput.contiguous(), softmax_lse, key_end

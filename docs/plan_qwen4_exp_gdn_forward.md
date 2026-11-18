@@ -89,7 +89,7 @@ Every knob that moves work between programs loses. For `chunk_fwd_o` a 4x larger
 
 The one thing that does work in Triton is more independent work per program, and it saturates. Two chunks per program, unrolled, so there are two independent load-to-dot chains in flight, is worth 6.4% on `wu_recompute` (1.764 -> 1.652 ms). Four chunks is already worse than two.
 
-What is left, then, is shared-memory traffic, and reading the kernels settles where it comes from. Every `tl.dot` stages its operands through LDS, so a tile *computed* in one layout and consumed in another - which is what a transpose of an accumulator is - costs a store and a load of the whole tile.
+What is left, then, is shared-memory traffic, and reading the kernels settles where it comes from. Every `tl.dot` stages its operands through LDS, so a tile computed in one layout and consumed in another - which is what a transpose of an accumulator is - costs a store and a load of the whole tile.
 
 `chunk_fwd_o` on this path transposes nothing at all: it loads `q` as `[BT, BK]` and `k` as `[BK, BT]` with the index expressions swapped, which Triton turns into the right operand layout without a conversion, and its only accumulator-to-operand move is `b_A` feeding the intra-chunk dot. `bwd_dqkwg` transposes `b_ds`, computed inside the kernel from `do` and `v`, so no choice of load pattern avoids it. `prepare_wy_repr_bwd` transposes both a loaded tile, which a transposed load could in principle avoid, and a dot result, which it could not.
 
@@ -182,7 +182,7 @@ The gate parameters' gradients come out bit-exact. The three that carry error al
 Three defects that only measuring found, all of them silent, are recorded here because each is a trap for the next kernel in this family:
 - The normalization backward first summed `y` over the broadcast copies as well as the gradient, which tripled the sum of squares and shrank `rstd` by sqrt(3). The copies hold the same row, so only the gradient sums.
 - Autograd hands the gate's gradient over as a non-contiguous broadcast. The kernels index every gradient row-major, so reading it at face value picked up 72000-sized values from unrelated memory while `d b` stayed correct, which made it look like a gate-kernel bug rather than a layout one. The backward now makes each incoming gradient contiguous.
-- The transposed convolution reads *ahead* of the row it writes, so its `source < T` bound can never be dropped. Unifying the row masks dropped it, and the sweep then read past the end of `dz` and faulted the device. The test geometry, sequence 100 against a 64-row block, had exercised the same path without faulting, which is why the bound belongs in the code rather than in a comment.
+- The transposed convolution reads ahead of the row it writes, so its `source < T` bound can never be dropped. Unifying the row masks dropped it, and the sweep then read past the end of `dz` and faulted the device. The test geometry, sequence 100 against a 64-row block, had exercised the same path without faulting, which is why the bound belongs in the code rather than in a comment.
 
 Wiring it needs two things beyond the patch itself: the model must call the core with `use_qk_l2norm_in_kernel=False`, because the preparation normalizes, and the head order must be the tiled one the `out_proj` weights are stored in. Both are in `configure_fused_preparation`, which patches the layer forwards through the shared module-patching protocol, and the patch records the broadcast it performs so the tiled gate keeps reading 36 of 36 layers.
 
@@ -203,13 +203,13 @@ Wiring it needs two things beyond the patch itself: the model must call the core
 
 The kernel runs `block_d=32`, one warp, two stages and two chunks per program: 2.995 -> 1.650 ms per call, so 0.551x of what it replaces, and the two calls a step it serves - one in the forward, one inside the backward's recomputation - make it -2.7 ms per layer per step. The same inverted answer as the attention sweeps applies - the small tile with one warp wins and the widest tile loses - and two chunks per program was added after the roofline work showed these kernels are limited by the serial load-to-dot chain inside a program rather than by wave count.
 
-Two defects the tests caught, both of which would have read plausible numbers: the token block is not a free tiling parameter (the contraction of both matmuls is the chunk, so a smaller block sums part of the chunk and a larger one reads into the next chunk, and the sweep's apparent 0.535x winner at 16 rows was computing a quarter of the sum), and `w` carries the *value* head axis while `k` carries the key axis, so indexing one with the other's offset walks off the buffer. `test_gdn_wu_recompute.py` gates the comparison against FLA's kernel, the layout, the gate-free path, determinism and the argument validation.
+Two defects the tests caught, both of which would have read plausible numbers: the token block is not a free tiling parameter (the contraction of both matmuls is the chunk, so a smaller block sums part of the chunk and a larger one reads into the next chunk, and the sweep's apparent 0.535x winner at 16 rows was computing a quarter of the sum), and `w` carries the value head axis while `k` carries the key axis, so indexing one with the other's offset walks off the buffer. `test_gdn_wu_recompute.py` gates the comparison against FLA's kernel, the layout, the gate-free path, determinism and the argument validation.
 
 ## Rejected and closed
 
 Everything here was measured or reasoned to a decision, and the reason is recorded so the next round does not repeat it.
 
-F0's other two entries: reverted. Both measured *slower* than the entries already deployed, so the table keeps what it had:
+F0's other two entries: reverted. Both measured slower than the entries already deployed, so the table keeps what it had:
 
 | kernel | deployed | candidate | candidate ms | deployed ms | ratio |
 | --- | --- | --- | ---: | ---: | ---: |

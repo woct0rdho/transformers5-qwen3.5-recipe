@@ -5,12 +5,14 @@ import time
 from collections import defaultdict
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 import torch
 from transformers.integrations.gguf.gguf_quantized_parameter import (
     GgufQuantizedParameter,
 )
+
+from adamw_8bit_sr import is_routed_expert_adapter
 
 
 def process_memory() -> dict[str, int]:
@@ -57,13 +59,16 @@ def memory_snapshot() -> dict[str, int]:
     return accelerator_memory() | process_memory()
 
 
+_PhaseResult = TypeVar("_PhaseResult")
+
+
 def run_phase(
     timeline: dict[str, Any],
     name: str,
-    function: Callable[[], Any],
+    function: Callable[[], _PhaseResult],
     *,
     reset_peak: bool = True,
-) -> Any:
+) -> _PhaseResult:
     """Run one synchronized phase and retain wall time plus peak memory."""
 
     torch.cuda.synchronize()
@@ -348,10 +353,28 @@ def audit_optimizer(
             for group in optimizer.param_groups
         ],
     }
+
+    # `AdamW8bitSR` carries the routed-expert decay separately (the experts see top_k/experts of
+    # the rows a dense projection sees, so they take the smaller value). Report it, and check that
+    # the parameters it covers really are the packed expert adapters of this model.
+    routed_expert_decay = getattr(optimizer, "routed_expert_decay", None)
+    if routed_expert_decay is not None:
+        routed_ids = {
+            id(parameter)
+            for name, parameter in model.named_parameters()
+            if parameter.requires_grad and is_routed_expert_adapter(name)
+        }
+        report["routed_expert_decay"] = routed_expert_decay
+        report["routed_expert_tensors"] = len(routed_ids)
+        report["routed_expert_tensors_mismatched"] = len(
+            routed_ids ^ (getattr(optimizer, "routed_ids", set()) & trainable_ids)
+        )
+
     if (
         report["parameter_tensors"] != report["unique_parameter_tensors"]
         or report["missing_trainable_tensors"]
         or report["extra_tensors"]
+        or report.get("routed_expert_tensors_mismatched")
     ):
         raise RuntimeError(f"adapter optimizer audit failed: {report}")
     return report

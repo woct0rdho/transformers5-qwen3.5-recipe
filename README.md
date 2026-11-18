@@ -21,7 +21,7 @@ Things involved in the training:
 - Chunked cross entropy loss like Liger Kernel, which works with MMQ
 - Autoregressive decoding cache and load balancing loss disabled to save VRAM
 - Non-reentrant gradient checkpointing
-- bitsandbytes AdamW 8-bit optimizer
+- AdamW 8-bit optimizer like bitsandbytes, with stochastic rounding for bf16 parameter updates
 
 Qwen3.5-specific:
 - APEX-I-Mini quantization that only takes 13.3 GiB, see https://huggingface.co/mudler/Qwen3.6-35B-A3B-APEX-GGUF/blob/main/Qwen3.6-35B-A3B-APEX-I-Mini.gguf

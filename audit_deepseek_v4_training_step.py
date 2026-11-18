@@ -13,7 +13,6 @@ import re
 from pathlib import Path
 from typing import Any
 
-import bitsandbytes as bnb
 import torch
 from datasets import Dataset, load_from_disk
 from peft import LoraConfig, TaskType, get_peft_model
@@ -25,6 +24,7 @@ from transformers.integrations.gguf.modules import GgufGroupedLinear
 from transformers.integrations.gguf.moe import DeepseekV4GgufExperts
 from transformers.models.deepseek_v4.modeling_deepseek_v4 import DeepseekV4DecoderLayer
 
+from adamw_8bit_sr import AdamW8bitSR
 from deepseek_v4_attention import (
     configure_deepseek_v4_attention,
     require_complete_deepseek_v4_attention,
@@ -100,7 +100,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rank", type=int, default=4)
     parser.add_argument("--alpha", type=int, default=4)
     parser.add_argument("--learning-rate", type=float, default=1e-4)
-    parser.add_argument("--weight-decay", type=float, default=1e-3)
+    parser.add_argument("--weight-decay", type=float, default=1e-2)
+    parser.add_argument("--moe-weight-decay", type=float, default=1e-3)
     parser.add_argument("--max-grad-norm", type=float, default=1.0)
     parser.add_argument("--row-start", type=int, default=0)
     parser.add_argument("--seed", type=int, default=19_260_817)
@@ -358,10 +359,11 @@ def main() -> None:
     optimizer = run_phase(
         report["timeline"],
         "optimizer_create",
-        lambda: bnb.optim.AdamW8bit(
-            [parameter for parameter in model.parameters() if parameter.requires_grad],
+        lambda: AdamW8bitSR(
+            model.named_parameters(),
             lr=args.learning_rate,
             weight_decay=args.weight_decay,
+            routed_expert_decay=args.moe_weight_decay,
         ),
     )
     report["optimizer"] = audit_optimizer(optimizer, model)

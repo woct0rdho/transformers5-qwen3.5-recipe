@@ -791,7 +791,7 @@ def test_one_expert_layer_has_finite_lora_gradients_and_no_packed_gradients(
     def recording_split_gate(gate, up):
         gate_inputs.append((gate, up))
         # nn.Module's dynamic attribute typing hides the real bound method.
-        return real_split_gate(experts, gate, up)  # ty: ignore[call-non-callable]
+        return real_split_gate(experts, gate, up)  # ty: ignore[not-callable]
 
     monkeypatch.setattr(fast_moe_lora, "_base_grouped_pair", recording_base_pair)
     experts.__dict__["_apply_split_gate"] = recording_split_gate

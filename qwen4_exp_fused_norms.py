@@ -30,7 +30,7 @@ from typing import Any
 import torch
 import triton
 import triton.language as tl
-from fla.modules.fused_norm_gate import LayerNormGatedFunction
+from fla.modules.norm.fused_norm_gate import LayerNormGatedFunction
 from liger_kernel.ops import LigerRMSNormFunction
 from transformers.models.qwen4_exp.modeling_qwen4_exp import (
     Qwen4ExpTextRMSNorm,
@@ -164,7 +164,7 @@ class _GroupedRMSNormFunction(torch.autograd.Function):
         return out
 
     @staticmethod
-    def backward(ctx: Any, dout: torch.Tensor):  # ty: ignore[invalid-method-override]
+    def backward(ctx: Any, dout: torch.Tensor):  # ty: ignore[incompatible-method-override]
         x, weight, invr = ctx.saved_tensors
         group = ctx.group
         rows, groups, width = _rows_and_shapes(x, group)

@@ -3,6 +3,7 @@ from collections.abc import Callable
 from typing import Any, cast
 
 import torch
+from transformers.cache_utils import Cache
 from transformers.masking_utils import ALL_MASK_ATTENTION_FUNCTIONS
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 from transformers.models.deepseek_v4.configuration_deepseek_v4 import (
@@ -10,6 +11,7 @@ from transformers.models.deepseek_v4.configuration_deepseek_v4 import (
 )
 from transformers.models.deepseek_v4.modeling_deepseek_v4 import (
     DeepseekV4Attention,
+    DeepseekV4CSACompressor,
     DeepseekV4Model,
     apply_rotary_pos_emb,
 )
@@ -160,7 +162,7 @@ def _deepseek_v4_csa_module_forward(
     | tuple[torch.Tensor, torch.Tensor],
     position_ids: torch.Tensor,
     attention_mask: torch.Tensor | None,
-    past_key_values=None,
+    cache: Cache | None = None,
     **kwargs: Any,
 ):
     if not getattr(module, _CSA_CONFIG_MARKER, False):
@@ -173,7 +175,7 @@ def _deepseek_v4_csa_module_forward(
         or hidden_states.dtype != torch.bfloat16
     ):
         raise ValueError("DeepSeek V4 CSA requires model-width BF16 hidden states")
-    if past_key_values is not None:
+    if cache is not None:
         raise ValueError("DeepSeek V4 CSA does not support caches")
     if module.training and module.attention_dropout != 0.0:
         raise ValueError("DeepSeek V4 CSA requires dropout zero")
@@ -199,11 +201,11 @@ def _deepseek_v4_csa_module_forward(
     if kwargs.get("output_attentions", False):
         raise ValueError("DeepSeek V4 CSA does not materialize attention weights")
 
-    compressor = module.compressor
+    compressor = cast(DeepseekV4CSACompressor, module.compressor)
     if (
         compressor is None
         or compressor.compress_rate != 4
-        or cast(Any, compressor.indexer).index_topk != _COMPRESSED_LENGTH
+        or compressor.indexer.index_topk != _COMPRESSED_LENGTH
     ):
         raise ValueError("DeepSeek V4 CSA requires rate 4 and top-k 512")
 
@@ -250,7 +252,7 @@ def _deepseek_v4_hca_module_forward(
     | tuple[torch.Tensor, torch.Tensor],
     position_ids: torch.Tensor,
     attention_mask: torch.Tensor | None,
-    past_key_values=None,
+    cache: Cache | None = None,
     **kwargs: Any,
 ):
     if not getattr(module, _HCA_CONFIG_MARKER, False):
@@ -263,7 +265,7 @@ def _deepseek_v4_hca_module_forward(
         or hidden_states.dtype != torch.bfloat16
     ):
         raise ValueError("DeepSeek V4 HCA requires model-width BF16 hidden states")
-    if past_key_values is not None:
+    if cache is not None:
         raise ValueError("DeepSeek V4 HCA does not support caches")
     if module.training and module.attention_dropout != 0.0:
         raise ValueError("DeepSeek V4 HCA requires dropout zero")
@@ -336,7 +338,7 @@ def _argument_map(args: tuple[Any, ...], kwargs: dict[str, Any]) -> dict[str, An
         "input_ids",
         "attention_mask",
         "position_ids",
-        "past_key_values",
+        "cache",
         "inputs_embeds",
         "use_cache",
     )
@@ -363,9 +365,7 @@ def _validate_model_inputs(
             "DeepSeek V4 fixed attention requires B in {1,4,16} and S=2048, "
             f"got B={batch}, S={sequence_length}"
         )
-    if values.get("past_key_values") is not None or bool(
-        values.get("use_cache", False)
-    ):
+    if values.get("cache") is not None or bool(values.get("use_cache", False)):
         raise ValueError("DeepSeek V4 fixed training attention does not support caches")
 
     attention_mask = values.get("attention_mask")

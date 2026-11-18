@@ -22,6 +22,7 @@ the contract the backward's pad handling assumes.
 from typing import Any
 
 import torch
+from transformers.cache_utils import Cache
 from transformers.models.qwen4_exp.modeling_qwen4_exp import (
     Qwen4ExpTextAttention,
     apply_rotary_pos_emb,
@@ -78,11 +79,11 @@ def _qwen4_qsa_forward_serves(
     module: Qwen4ExpTextAttention,
     hidden_states: torch.Tensor,
     attention_mask: torch.Tensor | None,
-    past_key_values: Any,
+    cache: Cache | None,
 ) -> bool:
     """Whether the fixed-shape kernels serve this call as it stands."""
 
-    if past_key_values is not None:
+    if cache is not None:
         return False
     if hidden_states.dim() != 3:
         return False
@@ -105,7 +106,7 @@ def _qwen4_qsa_attention_forward(
     hidden_states: torch.Tensor,
     position_embeddings: tuple[torch.Tensor, torch.Tensor],
     attention_mask: torch.Tensor | None,
-    past_key_values: Any = None,
+    cache: Cache | None = None,
     **kwargs: Any,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     reference = getattr(self, _REFERENCE_ATTRIBUTE, None)
@@ -113,14 +114,12 @@ def _qwen4_qsa_attention_forward(
         raise RuntimeError(
             "Qwen4-Exp QSA attention has no reference forward to fall back to"
         )
-    if not _qwen4_qsa_forward_serves(
-        self, hidden_states, attention_mask, past_key_values
-    ):
+    if not _qwen4_qsa_forward_serves(self, hidden_states, attention_mask, cache):
         return reference(
             hidden_states,
             position_embeddings,
             attention_mask,
-            past_key_values,
+            cache,
             **kwargs,
         )
     key_end = _key_end_from_mask(attention_mask)
@@ -129,7 +128,7 @@ def _qwen4_qsa_attention_forward(
             hidden_states,
             position_embeddings,
             attention_mask,
-            past_key_values,
+            cache,
             **kwargs,
         )
 

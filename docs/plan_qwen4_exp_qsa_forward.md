@@ -51,7 +51,7 @@ Per layer per batch element: Q 25.2 MB, K and V 2.1 MB each, gate 25.2 MB, outpu
 
 ## Accepted design
 
-One program owns a tile of query *positions* across a group of query heads that share one KV head, following the DeepSeek grouped design. Because all rows in the tile share the same query positions, they share the causal bound and the padding bound, which is what makes grouping cheap:
+One program owns a tile of query positions across a group of query heads that share one KV head, following the DeepSeek grouped design. Because all rows in the tile share the same query positions, they share the causal bound and the padding bound, which is what makes grouping cheap:
 - Logical rows are `G x BLOCK_M` with `G x BLOCK_M <= 64` at `D=256` in FP32, the register budget the DeepSeek kernel hit at 256 VGPRs. Candidate shapes, to be screened: `G=12, BLOCK_M=4` (48 rows, all heads of a KV head in one program), `G=6, BLOCK_M=8`, `G=4, BLOCK_M=16` (64 rows), `G=3, BLOCK_M=16`. `G=12, BLOCK_M=8` needs 96 rows and is expected to spill.
 - K/V tiles are loaded once per program and reused across the group's heads, which is where the measured 2x of the DeepSeek grouped design came from. With `G=12` a single K/V read serves every query head of that KV head.
 - Key traversal is a `tl.range` over `BLOCK_N in {32, 64, 128}` with `hi = min(rows_lo + BLOCK_M, kv_end)` for the causal bound and a lower bound of zero. Tiles entirely above the diagonal are skipped rather than masked, so no masked cell is ever multiplied and the `0 * NaN` poison case that `qsa_pp_tg_margins.md` documents cannot arise.

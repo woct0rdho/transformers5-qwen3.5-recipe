@@ -1990,7 +1990,7 @@ class _CSAAttentionFunction(torch.autograd.Function):
         return output
 
     @staticmethod
-    def backward(ctx: Any, grad_output):  # ty: ignore[invalid-method-override]
+    def backward(ctx: Any, grad_output):  # ty: ignore[incompatible-method-override]
         (
             query,
             local_kv,
@@ -2149,7 +2149,7 @@ class _CSAProducerFunction(torch.autograd.Function):
         return output
 
     @staticmethod
-    def backward(ctx: Any, grad_output):  # ty: ignore[invalid-method-override]
+    def backward(ctx: Any, grad_output):  # ty: ignore[incompatible-method-override]
         kv, gate, bias, weight, cos, sin = ctx.saved_tensors
         if grad_output.dtype != torch.bfloat16 or grad_output.stride(-1) != 1:
             raise ValueError(

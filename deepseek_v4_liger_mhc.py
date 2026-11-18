@@ -708,7 +708,7 @@ class _DeepseekV4MHCPrepareFunction(torch.autograd.Function):
         return x, coeff.view(*outer, _MIX), collapsed.view(*outer, _HIDDEN)
 
     @staticmethod
-    def backward(  # ty: ignore[invalid-method-override]
+    def backward(  # ty: ignore[incompatible-method-override]
         ctx: Any,
         grad_residual: torch.Tensor,
         grad_coeff: torch.Tensor,
@@ -797,7 +797,7 @@ class _DeepseekV4MHCMergeFunction(torch.autograd.Function):
         return output
 
     @staticmethod
-    def backward(  # ty: ignore[invalid-method-override]
+    def backward(  # ty: ignore[incompatible-method-override]
         ctx: Any,
         grad_output: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -876,7 +876,7 @@ class _DeepseekV4MHCHeadFunction(torch.autograd.Function):
         return output.view(*outer, _HIDDEN)
 
     @staticmethod
-    def backward(  # ty: ignore[invalid-method-override]
+    def backward(  # ty: ignore[incompatible-method-override]
         ctx: Any,
         grad_output: torch.Tensor,
     ) -> tuple[torch.Tensor | None, ...]:

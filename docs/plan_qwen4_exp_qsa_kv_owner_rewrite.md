@@ -13,7 +13,7 @@ All at batch 1, `BLOCK_N=16`, `BLOCK_M=32`, `num_warps=2`, `SPLIT=4`, 4 samples,
 | full | 22.99 ms | - | - |
 | free-loads (every iteration loads the same query tile, so Q/dO hit L1) | 7.67 ms | the streaming traffic of Q and dO | 66.6% |
 | loads-only | 2.97 ms | all tile math (the loads get hoisted, so this is a floor, not a roofline) | 87.1% |
-| no-elementwise (no exp2, no causal mask, no delta) | 25.01 ms | 2.2 ms of elementwise work, and it got *slower* | -8.8% |
+| no-elementwise (no exp2, no causal mask, no delta) | 25.01 ms | 2.2 ms of elementwise work, and it got slower | -8.8% |
 | no-dots (row sums instead of `tl.dot`) | 37.50 ms | the MMA work, and it got much slower | -63.1% |
 | transposed-acc (accumulators as `[D, BLOCK_N]`, transposed loads) | 30.41 ms | the two per-iteration `tl.trans` calls | -32.3% |
 
@@ -110,7 +110,7 @@ The kernel took a full owner's worth of code: the same grid, split, head loop an
 
 What the port needed from the API, none of it obvious from the tutorials:
 
-Layouts cannot be passed as nested Python lists, because the frontend hashes constexpr arguments and lists are unhashable. They have to be constructed on the host and passed as `gl.constexpr` layout objects, which is what the CDNA5 examples do for exactly this reason. An `lse` or `delta` vector that will broadcast against the score tile must be loaded in a slice of the *score* layout, not in a slice of the operand layout the streamed loads use, or the broadcast fails with a layout mismatch.
+Layouts cannot be passed as nested Python lists, because the frontend hashes constexpr arguments and lists are unhashable. They have to be constructed on the host and passed as `gl.constexpr` layout objects, which is what the CDNA5 examples do for exactly this reason. An `lse` or `delta` vector that will broadcast against the score tile must be loaded in a slice of the score layout, not in a slice of the operand layout the streamed loads use, or the broadcast fails with a layout mismatch.
 
 A dot's A operand must be converted or loaded in `DotOperandLayout(0, parent, 16)` explicitly. The parent's warp bases then decide how the operand's K axis is covered. `num_warps` changes the warp bases that are legal, so the layout set is built per warp count.
 
@@ -124,7 +124,7 @@ The two paths the owner actually depends on - a `[BN, BM]` A operand read transp
 
 ### The two bugs
 
-The first was mine and mechanical, and it is why the closed-form test exists. The key/value offsets dropped the `start_n` term, so all 1024 programs loaded and stored the *first* key tile and raced on the same addresses. The symptom was that only key tile 0 held output and everything else was exactly zero, and the raw workspace dump showed row 0 written by key tiles 80 through 86. What localised it was a degenerate case with a closed form: setting `p = dS = 1` turns both accumulations into plain sums of the streamed operands, so the expected value of every key row is a suffix sum that can be computed in torch and compared row by row. That test is worth keeping as the first thing to run on any rewrite of this kernel.
+The first was mine and mechanical, and it is why the closed-form test exists. The key/value offsets dropped the `start_n` term, so all 1024 programs loaded and stored the first key tile and raced on the same addresses. The symptom was that only key tile 0 held output and everything else was exactly zero, and the raw workspace dump showed row 0 written by key tiles 80 through 86. What localised it was a degenerate case with a closed form: setting `p = dS = 1` turns both accumulations into plain sums of the streamed operands, so the expected value of every key row is a suffix sum that can be computed in torch and compared row by row. That test is worth keeping as the first thing to run on any rewrite of this kernel.
 
 The second is a property of the hardware path rather than of the code. The kernel needs two workgroup barriers per iteration, one after staging all four tiles and one immediately before the accumulation reads. Removing the second one made it 60% slower - 30.8 ms against 19.4 ms at the same configuration - and the effect reproduced in both directions with 9 samples and spreads under 0.2%. The barrier does not only synchronise shared memory. On this target it also fixes the schedule the compiler picks for the shared-memory reads.
 

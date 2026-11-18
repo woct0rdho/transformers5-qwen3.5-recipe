@@ -24,6 +24,7 @@ every visible token.
 from typing import Any
 
 import torch
+from transformers.cache_utils import Cache
 from transformers.models.qwen4_exp.modeling_qwen4_exp import Qwen4ExpTextQSAIndexer
 
 from module_patching import (
@@ -87,21 +88,17 @@ def _qwen4_indexer_forward(
     hidden_states: torch.Tensor,
     position_embeddings: tuple[torch.Tensor, torch.Tensor],
     attention_mask: torch.Tensor,
-    past_key_values: Any,
+    cache: Cache | None,
 ) -> torch.Tensor:
     reference = getattr(self, _REFERENCE_ATTRIBUTE, None)
     if reference is None:
         raise RuntimeError(
             "Qwen4-Exp QSA indexer has no reference forward to fall back to"
         )
-    if past_key_values is not None or not torch.is_tensor(attention_mask):
-        return reference(
-            hidden_states, position_embeddings, attention_mask, past_key_values
-        )
+    if cache is not None or not torch.is_tensor(attention_mask):
+        return reference(hidden_states, position_embeddings, attention_mask, cache)
     if not is_exhaustive_at(*_guard_values(self), hidden_states.shape[1]):
-        return reference(
-            hidden_states, position_embeddings, attention_mask, past_key_values
-        )
+        return reference(hidden_states, position_embeddings, attention_mask, cache)
     return _identity_mask(attention_mask)
 
 

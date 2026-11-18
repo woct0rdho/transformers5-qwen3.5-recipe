@@ -20,7 +20,8 @@ from typing import Any, cast
 import pytest
 import torch
 import torch.nn.functional as F
-from fla.modules.l2norm import l2norm
+from fla.modules.norm.l2norm import l2norm
+from transformers.cache_utils import Cache
 from transformers.models.qwen4_exp.modeling_qwen4_exp import (
     Qwen4ExpTextGatedDeltaNet,
     causal_conv1d_fn,
@@ -435,7 +436,7 @@ def _wiring_run(
     for parameter in layer.parameters():
         parameter.grad = None
     inputs = hidden.detach().clone().requires_grad_(True)
-    output = layer(inputs, cache_params=None)
+    output = layer(inputs, cache=None)
     output.float().sum().backward()
     assert inputs.grad is not None
     gradients = [inputs.grad.float().clone()]
@@ -511,7 +512,7 @@ def test_the_guard_rejects_paths_the_patch_does_not_serve() -> None:
     from gdn_fused_prep import _training_path_applies
 
     assert _training_path_applies(None, {})
-    assert not _training_path_applies(object(), {})
+    assert not _training_path_applies(cast(Cache, object()), {})
     assert not _training_path_applies(None, {"cu_seqlens": torch.ones(2)})
     assert not _training_path_applies(None, {"seq_idx": torch.ones(1, 2)})
 
@@ -536,12 +537,12 @@ def test_the_wiring_matches_the_eager_layer_with_a_padding_mask() -> None:
 
     for parameter in layer.parameters():
         parameter.grad = None
-    eager = layer(hidden, cache_params=None, attention_mask=mask).float().clone()
+    eager = layer(hidden, cache=None, attention_mask=mask).float().clone()
 
     configure_fused_preparation(layer)
     for parameter in layer.parameters():
         parameter.grad = None
-    fused = layer(hidden, cache_params=None, attention_mask=mask).float().clone()
+    fused = layer(hidden, cache=None, attention_mask=mask).float().clone()
 
     assert_close_mixed_precision(
         fused, eager, minimum_cosine=0.99999, maximum_relative_rmse=5e-3

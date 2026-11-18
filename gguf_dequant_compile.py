@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from typing import Any, cast
 
 import torch
@@ -23,7 +24,7 @@ def configure_compiled_gguf_dequantize() -> bool:
         return False
 
     eager_dequantize = gguf_dequant.dequantize
-    compile_fn = cast(Any, torch.compile)
+    compile_fn = cast(Callable[..., Any], torch.compile)
     compiled_dequantize = compile_fn(
         eager_dequantize,
         fullgraph=True,

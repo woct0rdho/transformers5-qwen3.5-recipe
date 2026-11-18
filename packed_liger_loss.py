@@ -534,7 +534,7 @@ def assembled_scoped_output(
         loss=cast(torch.FloatTensor | None, loss),
         aux_loss=cast(torch.FloatTensor | None, aux_loss),
         logits=cast(torch.FloatTensor | None, logits),
-        past_key_values=getattr(outputs, "past_key_values", None),
+        cache=getattr(outputs, "cache", None),
         hidden_states=getattr(outputs, "hidden_states", None),
         attentions=getattr(outputs, "attentions", None),
         router_logits=getattr(outputs, "router_logits", None),
